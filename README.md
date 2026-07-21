@@ -3,6 +3,8 @@
 A two-workload Python sample deployed with one `azd up`:
 
 - A Microsoft Agent Framework chat application authenticates the user.
+- A React and TypeScript interface built from shadcn conversation primitives
+  presents the live identity path and chat.
 - A separate FastMCP server provides user-scoped order tools.
 - The agent uses a Microsoft Foundry `gpt-5.6-terra` deployment.
 - Every MCP call carries the signed-in user's delegated token.
@@ -76,7 +78,8 @@ processing orders can be cancelled. Repeating the current status is idempotent.
 - Azure CLI, Azure Developer CLI, `uv`, `kubectl`, `kubelogin`, and Helm 3.
 - macOS, Linux, or WSL for the POSIX `azd` hooks.
 
-No local Docker daemon is required.
+No local Docker daemon is required. Node.js 22 is needed only when changing or
+validating the frontend locally; ACR builds it remotely during `azd up`.
 
 ## Deploy
 
@@ -130,8 +133,10 @@ Important outputs:
 
 | Path | Purpose |
 |---|---|
-| `src/chat.py` | Web login, chat UI, Agent Framework, and delegated MCP calls |
+| `src/chat.py` | Web login, safe session API, static hosting, Agent Framework, and delegated MCP calls |
 | `src/server.py` | FastMCP order tools and Graph OBO |
+| `frontend/` | Vite React application with local shadcn UI and chat components |
+| `Dockerfile.chat` | Multi-stage frontend and locked Python chat image |
 | `infra/main.bicep` | Azure, Foundry, Entra, consent, federation, and RBAC |
 | `k8s/chat/` | Chat Deployment, Service, issuer, and shared Ingress |
 | `k8s/mcp/` | MCP Deployment and Service |
@@ -141,6 +146,7 @@ Important outputs:
 
 ```bash
 uv sync --frozen
+cd frontend && npm ci && npm run build && npm run lint && cd ..
 uv run python -m unittest -v
 uv run python -m compileall -q src test_accelerator.py
 az bicep build --file infra/main.bicep --stdout > /dev/null

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import tempfile
 import unittest
 from itertools import count
@@ -152,6 +151,16 @@ class FakeMsalApp:
         return {"access_token": "mcp-user-token"}
 
 
+class FakeMsalErrorApp(FakeMsalApp):
+    def acquire_token_by_auth_code_flow(
+        self, _: object, __: object
+    ) -> dict[str, str]:
+        return {
+            "error": "access_denied",
+            "error_description": "The user denied consent.",
+        }
+
+
 class FakeCredential:
     def __init__(self, *_: object, **__: object) -> None:
         pass
@@ -201,6 +210,18 @@ class ChatTests(unittest.TestCase):
             token_file=token_file,
         )
 
+    def frontend_dist(self, directory: str) -> Path:
+        root = Path(directory) / "frontend"
+        assets = root / "assets"
+        assets.mkdir(parents=True)
+        (root / "index.html").write_text(
+            '<!doctype html><div id="root"></div><script src="/assets/app.js"></script>',
+            encoding="utf-8",
+        )
+        (root / "favicon.svg").write_text("<svg></svg>", encoding="utf-8")
+        (assets / "app.js").write_text("window.ORDER_AGENT = true", encoding="utf-8")
+        return root
+
     def test_workload_assertion_and_chat_input_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             token_file = Path(directory) / "token"
@@ -214,13 +235,14 @@ class ChatTests(unittest.TestCase):
     def test_live_client_flow_forwards_user_token_to_agent_mcp_tool(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = self.settings(Path(directory) / "token")
+            frontend_dist = self.frontend_dist(directory)
             with (
                 patch("src.chat.ConfidentialClientApplication", FakeMsalApp),
                 patch("src.chat.WorkloadIdentityCredential", FakeCredential),
                 patch("src.chat.FoundryChatClient", lambda **_: object()),
                 patch("src.chat.Agent", FakeAgent),
                 TestClient(
-                    create_app(settings),
+                    create_app(settings, frontend_dist=frontend_dist),
                     base_url="https://orders.example.test",
                     follow_redirects=False,
                 ) as client,
@@ -236,15 +258,28 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(callback.status_code, 303)
 
                 page = client.get("/")
-                self.assertIn("overflow-y: auto", page.text)
-                self.assertIn("messages.scrollTop = messages.scrollHeight", page.text)
-                csrf_match = re.search(r'const csrf = "([^"]+)"', page.text)
-                self.assertIsNotNone(csrf_match)
-                csrf = csrf_match.group(1)
+                self.assertIn('<div id="root"></div>', page.text)
+
+                browser_session = client.get("/api/session")
+                self.assertEqual(browser_session.status_code, 200)
+                session_payload = browser_session.json()
+                self.assertTrue(session_payload["authenticated"])
+                self.assertEqual(session_payload["profile"]["name"], "Ada")
+                self.assertTrue(session_payload["historyKey"])
+                self.assertEqual(session_payload["model"], "gpt-5.6-terra")
+                self.assertEqual(
+                    session_payload["mcp"]["tools"],
+                    [
+                        "create_order",
+                        "get_order",
+                        "list_orders",
+                        "update_order_status",
+                    ],
+                )
 
                 response = client.post(
                     "/api/chat",
-                    headers={"X-CSRF-Token": csrf},
+                    headers={"X-CSRF-Token": session_payload["csrfToken"]},
                     json={"message": "What orders do I have?"},
                 )
 
@@ -255,12 +290,101 @@ class ChatTests(unittest.TestCase):
 
     def test_unauthenticated_and_csrf_requests_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            frontend_dist = self.frontend_dist(directory)
             with TestClient(
-                create_app(self.settings(Path(directory) / "token")),
+                create_app(
+                    self.settings(Path(directory) / "token"),
+                    frontend_dist=frontend_dist,
+                ),
                 base_url="https://orders.example.test",
             ) as client:
+                session = client.get("/api/session")
                 response = client.post("/api/chat", json={"message": "hello"})
+                asset = client.get("/assets/app.js")
+        self.assertEqual(session.status_code, 200)
+        self.assertEqual(
+            session.json(),
+            {
+                "authenticated": False,
+                "model": "gpt-5.6-terra",
+                "mcp": {
+                    "name": "Order MCP",
+                    "tools": [
+                        "create_order",
+                        "get_order",
+                        "list_orders",
+                        "update_order_status",
+                    ],
+                },
+            },
+        )
         self.assertEqual(response.status_code, 401)
+        self.assertEqual(asset.text, "window.ORDER_AGENT = true")
+
+    def test_auth_errors_and_logout_failures_are_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self.settings(Path(directory) / "token")
+            frontend_dist = self.frontend_dist(directory)
+
+            with (
+                patch("src.chat.ConfidentialClientApplication", FakeMsalErrorApp),
+                TestClient(
+                    create_app(settings, frontend_dist=frontend_dist),
+                    base_url="https://orders.example.test",
+                    follow_redirects=False,
+                ) as client,
+            ):
+                client.get("/login")
+                denied = client.post(
+                    "/auth/callback",
+                    data={"state": "state", "code": "code"},
+                )
+
+            self.assertEqual(denied.status_code, 400)
+            self.assertEqual(
+                denied.text,
+                "Authentication failed: The user denied consent.",
+            )
+
+            with (
+                patch("src.chat.ConfidentialClientApplication", FakeMsalApp),
+                TestClient(
+                    create_app(settings, frontend_dist=frontend_dist),
+                    base_url="https://orders.example.test",
+                    follow_redirects=False,
+                ) as client,
+            ):
+                client.get("/login")
+                client.post(
+                    "/auth/callback",
+                    data={"state": "state", "code": "code"},
+                )
+                browser_session = client.get("/api/session").json()
+
+                rejected = client.post(
+                    "/logout",
+                    headers={"X-CSRF-Token": "wrong"},
+                )
+                still_authenticated = client.get("/api/session")
+                accepted = client.post(
+                    "/logout",
+                    headers={"X-CSRF-Token": browser_session["csrfToken"]},
+                )
+                signed_out = client.get("/api/session")
+
+            self.assertEqual(rejected.status_code, 403)
+            self.assertTrue(still_authenticated.json()["authenticated"])
+            self.assertEqual(accepted.status_code, 200)
+            self.assertIn("/oauth2/v2.0/logout?", accepted.json()["logoutUrl"])
+            self.assertFalse(signed_out.json()["authenticated"])
+
+    def test_missing_frontend_build_fails_at_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "Frontend build is missing"):
+                create_app(
+                    self.settings(Path(directory) / "token"),
+                    frontend_dist=Path(directory) / "missing",
+                )
 
 
 class DeploymentContractTests(unittest.TestCase):
@@ -280,6 +404,17 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("host: aks", azure_yaml)
         self.assertIn("helm upgrade --install", azure_yaml)
         self.assertFalse((ROOT / "scripts" / "deploy.py").exists())
+
+    def test_chat_image_builds_and_serves_the_shadcn_frontend(self) -> None:
+        dockerfile = (ROOT / "Dockerfile.chat").read_text(encoding="utf-8")
+        app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+        self.assertIn("FROM node:22-alpine AS frontend", dockerfile)
+        self.assertIn("COPY --from=frontend /frontend/dist ./frontend/dist", dockerfile)
+        self.assertIn("MessageScrollerProvider", app)
+        self.assertIn("BubbleContent", app)
+        self.assertIn('fetch("/api/session"', app)
+        self.assertIn("historyStorageKey(session.historyKey)", app)
+        self.assertIn('role="log"', app)
 
     def test_ingress_routes_chat_and_mcp_separately(self) -> None:
         ingress = (ROOT / "k8s" / "chat" / "ingress.yaml").read_text(

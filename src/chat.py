@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import os
 import secrets
@@ -20,12 +19,21 @@ from msal import ConfidentialClientApplication, SerializableTokenCache
 from pydantic import BaseModel, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from starlette.routing import Route
+from starlette.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 
 COOKIE_NAME = "order_agent_session"
 SESSION_TTL_SECONDS = 8 * 60 * 60
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_FRONTEND_DIST = ROOT / "frontend" / "dist"
 ORDER_TOOLS = {
     "list_orders",
     "get_order",
@@ -75,6 +83,7 @@ class Settings:
 @dataclass
 class BrowserSession:
     csrf_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
+    history_key: str = field(default_factory=lambda: secrets.token_urlsafe(18))
     token_cache: str = ""
     auth_flow: dict[str, Any] | None = None
     profile: dict[str, Any] | None = None
@@ -130,123 +139,19 @@ def _cookie(response: Response, session_id: str) -> None:
     )
 
 
-def _page(profile: dict[str, Any] | None, csrf_token: str | None = None) -> str:
-    if profile is None:
-        body = """
-        <main>
-          <h1>Order agent</h1>
-          <p>Sign in to ask about your orders.</p>
-          <a class="button" href="/login">Sign in with Microsoft</a>
-        </main>
-        """
-    else:
-        name = html.escape(str(profile.get("name") or "Signed-in user"))
-        csrf = json.dumps(csrf_token)
-        body = f"""
-        <main>
-          <header>
-            <div><h1>Order agent</h1><small>{name}</small></div>
-            <button id="logout" class="secondary">Sign out</button>
-          </header>
-          <section id="messages" aria-live="polite"></section>
-          <form id="chat-form">
-            <label for="message">Message</label>
-            <div class="composer">
-              <input id="message" maxlength="4000"
-                     placeholder="What orders do I have?" required autofocus>
-              <button type="submit">Send</button>
-            </div>
-          </form>
-        </main>
-        <script>
-          const csrf = {csrf};
-          const messages = document.querySelector("#messages");
-          const form = document.querySelector("#chat-form");
-          const input = document.querySelector("#message");
-
-          function add(role, text) {{
-            const item = document.createElement("p");
-            item.className = role;
-            item.textContent = text;
-            messages.appendChild(item);
-            messages.scrollTop = messages.scrollHeight;
-          }}
-
-          form.addEventListener("submit", async (event) => {{
-            event.preventDefault();
-            const message = input.value.trim();
-            if (!message) return;
-            add("user", message);
-            input.value = "";
-            input.disabled = true;
-            try {{
-              const response = await fetch("/api/chat", {{
-                method: "POST",
-                headers: {{
-                  "Content-Type": "application/json",
-                  "X-CSRF-Token": csrf
-                }},
-                body: JSON.stringify({{message}})
-              }});
-              const payload = await response.json();
-              if (response.status === 401) {{
-                location.href = "/login";
-                return;
-              }}
-              if (!response.ok) throw new Error(payload.error || "Chat failed");
-              add("agent", payload.response);
-            }} catch (error) {{
-              add("error", error.message);
-            }} finally {{
-              input.disabled = false;
-              input.focus();
-            }}
-          }});
-
-          document.querySelector("#logout").addEventListener("click", async () => {{
-            const response = await fetch("/logout", {{
-              method: "POST",
-              headers: {{"X-CSRF-Token": csrf}}
-            }});
-            location.href = response.redirected ? response.url : "/";
-          }});
-        </script>
-        """
-
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Order agent</title>
-  <style>
-    :root {{ color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }}
-    body {{ margin: 0; background: Canvas; color: CanvasText; }}
-    main {{ width: min(48rem, calc(100% - 2rem)); height: calc(100vh - 2rem);
-            margin: 1rem auto; display: flex; flex-direction: column; }}
-    header, .composer {{ display: flex; gap: .75rem; align-items: center; }}
-    header {{ justify-content: space-between; margin-bottom: 2rem; }}
-    h1 {{ margin: 0; }}
-    #messages {{ flex: 1; min-height: 0; overflow-y: auto; padding: .5rem; }}
-    #messages p {{ max-width: 80%; padding: .75rem 1rem; border-radius: .75rem; }}
-    #messages .user {{ margin-left: auto; background: Highlight; color: HighlightText; }}
-    #messages .agent {{ background: color-mix(in srgb, CanvasText 10%, Canvas); }}
-    #messages .error {{ color: #b42318; }}
-    label {{ display: block; margin-bottom: .4rem; }}
-    #chat-form {{ margin-top: 1rem; }}
-    input {{ flex: 1; padding: .75rem; font: inherit; }}
-    button, .button {{ padding: .7rem 1rem; font: inherit; cursor: pointer; }}
-    .button {{ display: inline-block; background: Highlight; color: HighlightText;
-               text-decoration: none; border-radius: .35rem; }}
-    .secondary {{ background: transparent; border: 1px solid GrayText; }}
-  </style>
-</head>
-<body>{body}</body>
-</html>"""
-
-
-def create_app(settings: Settings | None = None) -> Starlette:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    frontend_dist: Path | None = None,
+) -> Starlette:
     config = settings or Settings.from_env()
+    static_root = frontend_dist or DEFAULT_FRONTEND_DIST
+    index_path = static_root / "index.html"
+    assets_path = static_root / "assets"
+    if not index_path.is_file() or not assets_path.is_dir():
+        raise RuntimeError(
+            f"Frontend build is missing from {static_root}. Run npm --prefix frontend run build."
+        )
     sessions: dict[str, BrowserSession] = {}
 
     def current_session(request: Request) -> tuple[str, BrowserSession] | None:
@@ -264,12 +169,44 @@ def create_app(settings: Settings | None = None) -> Starlette:
         supplied = request.headers.get("X-CSRF-Token", "")
         return bool(supplied) and secrets.compare_digest(supplied, session.csrf_token)
 
-    async def index(request: Request) -> HTMLResponse:
+    async def index(_: Request) -> FileResponse:
+        return FileResponse(index_path)
+
+    async def favicon(_: Request) -> FileResponse:
+        return FileResponse(static_root / "favicon.svg", media_type="image/svg+xml")
+
+    async def session_info(request: Request) -> JSONResponse:
+        common = {
+            "model": config.foundry_model,
+            "mcp": {
+                "name": "Order MCP",
+                "tools": sorted(ORDER_TOOLS),
+            },
+        }
         active = current_session(request)
         if active is None:
-            return HTMLResponse(_page(None))
+            return JSONResponse({"authenticated": False, **common})
         _, session = active
-        return HTMLResponse(_page(session.profile, session.csrf_token))
+        if session.profile is None:
+            return JSONResponse({"authenticated": False, **common})
+        username = str(
+            session.profile.get("preferred_username")
+            or session.profile.get("email")
+            or ""
+        )
+        profile = {
+            "name": str(session.profile.get("name") or "Signed-in user"),
+            **({"username": username} if username else {}),
+        }
+        return JSONResponse(
+            {
+                "authenticated": True,
+                "profile": profile,
+                "csrfToken": session.csrf_token,
+                "historyKey": session.history_key,
+                **common,
+            }
+        )
 
     async def health(_: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
@@ -293,10 +230,10 @@ def create_app(settings: Settings | None = None) -> Starlette:
     async def auth_callback(request: Request) -> Response:
         active = current_session(request)
         if active is None:
-            return HTMLResponse("Authentication session expired.", status_code=400)
+            return PlainTextResponse("Authentication session expired.", status_code=400)
         session_id, session = active
         if session.auth_flow is None:
-            return HTMLResponse("Authentication flow is missing.", status_code=400)
+            return PlainTextResponse("Authentication flow is missing.", status_code=400)
 
         form = dict(await request.form())
         async with session.lock:
@@ -308,13 +245,16 @@ def create_app(settings: Settings | None = None) -> Starlette:
                     form,
                 )
             except ValueError:
-                return HTMLResponse("Authentication state is invalid.", status_code=400)
+                return PlainTextResponse("Authentication state is invalid.", status_code=400)
             finally:
                 session.auth_flow = None
 
             if "error" in result:
-                detail = html.escape(str(result.get("error_description", result["error"])))
-                return HTMLResponse(f"Authentication failed: {detail}", status_code=400)
+                detail = str(result.get("error_description", result["error"]))
+                return PlainTextResponse(
+                    f"Authentication failed: {detail}",
+                    status_code=400,
+                )
 
             session.profile = dict(result.get("id_token_claims") or {})
             _save_cache(session, cache)
@@ -405,20 +345,19 @@ def create_app(settings: Settings | None = None) -> Starlette:
 
         return JSONResponse({"response": result.text})
 
-    async def logout(request: Request) -> RedirectResponse | JSONResponse:
+    async def logout(request: Request) -> JSONResponse:
         active = current_session(request)
         if active is None:
-            return RedirectResponse("/", status_code=303)
+            return JSONResponse({"logoutUrl": "/"})
         session_id, session = active
         if not require_csrf(request, session):
             return JSONResponse({"error": "Invalid CSRF token"}, status_code=403)
         sessions.pop(session_id, None)
-        response = RedirectResponse(
-            "https://login.microsoftonline.com/"
-            f"{config.tenant_id}/oauth2/v2.0/logout?"
-            + urlencode({"post_logout_redirect_uri": config.app_url}),
-            status_code=303,
+        logout_url = (
+            f"https://login.microsoftonline.com/{config.tenant_id}/oauth2/v2.0/logout?"
+            + urlencode({"post_logout_redirect_uri": config.app_url})
         )
+        response = JSONResponse({"logoutUrl": logout_url})
         response.delete_cookie(COOKIE_NAME)
         return response
 
@@ -426,11 +365,14 @@ def create_app(settings: Settings | None = None) -> Starlette:
         debug=False,
         routes=[
             Route("/", index),
+            Route("/favicon.svg", favicon),
             Route("/health", health),
             Route("/login", login),
             Route("/auth/callback", auth_callback, methods=["POST"]),
+            Route("/api/session", session_info),
             Route("/api/chat", chat, methods=["POST"]),
             Route("/logout", logout, methods=["POST"]),
+            Mount("/assets", app=StaticFiles(directory=assets_path), name="assets"),
         ],
     )
 

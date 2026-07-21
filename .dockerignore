@@ -5,3 +5,14 @@
 !uv.lock
 !src/
 !src/**
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/components.json
+!frontend/index.html
+!frontend/tsconfig*.json
+!frontend/vite.config.ts
+!frontend/public/
+!frontend/public/**
+!frontend/src/
+!frontend/src/**
