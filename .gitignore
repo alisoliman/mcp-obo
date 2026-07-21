@@ -1,0 +1,6 @@
+.azure/
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+k8s/**/.env

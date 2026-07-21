@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastmcp-orders
+  labels:
+    app.kubernetes.io/name: fastmcp-orders
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fastmcp-orders
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fastmcp-orders
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: fastmcp-orders
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fastmcp-orders
+          image: mcp-image
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: mcp-config
+          env:
+            - name: PORT
+              value: "8000"
+            - name: FASTMCP_CHECK_FOR_UPDATES
+              value: "off"
+            - name: HOME
+              value: /tmp
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

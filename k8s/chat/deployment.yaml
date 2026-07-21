@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-agent-chat
+  labels:
+    app.kubernetes.io/name: order-agent-chat
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-agent-chat
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: order-agent-chat
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: order-agent-chat
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: order-agent-chat
+          image: chat-image
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8001
+          envFrom:
+            - configMapRef:
+                name: chat-config
+          env:
+            - name: PORT
+              value: "8001"
+            - name: HOME
+              value: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 750m
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

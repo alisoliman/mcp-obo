@@ -1,0 +1,295 @@
+from __future__ import annotations
+
+import asyncio
+import re
+import tempfile
+import unittest
+from itertools import count
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from pydantic import ValidationError
+from starlette.testclient import TestClient
+
+import src.server as server
+from src.chat import ChatRequest, Settings, _workload_assertion, create_app
+from src.server import (
+    OrderItem,
+    OrderStatus,
+    create_order_for,
+    get_order_for,
+    list_orders_for,
+    update_order_status_for,
+)
+
+
+ROOT = Path(__file__).resolve().parent
+
+
+class OrderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        server._orders.clear()
+        server._order_numbers = count(1)
+
+    def test_create_calculates_total_and_lists_by_owner(self) -> None:
+        order = create_order_for(
+            "user-a",
+            "Ada",
+            [
+                OrderItem(sku="ABC-1", quantity=2, unit_price_cents=1250),
+                OrderItem(sku="XYZ_2", quantity=1, unit_price_cents=499),
+            ],
+        )
+
+        self.assertEqual(order.order_id, "ORD-000001")
+        self.assertEqual(order.total_cents, 2999)
+        self.assertEqual(list_orders_for("user-a"), [order])
+        self.assertEqual(list_orders_for("user-b"), [])
+
+    def test_owner_isolation_hides_existing_order(self) -> None:
+        order = create_order_for(
+            "user-a",
+            "Ada",
+            [OrderItem(sku="ABC", quantity=1, unit_price_cents=100)],
+        )
+
+        with self.assertRaisesRegex(ValueError, "Order not found"):
+            get_order_for("user-b", order.order_id)
+
+    def test_valid_status_sequence_and_idempotency(self) -> None:
+        order = create_order_for(
+            "user-a",
+            "Ada",
+            [OrderItem(sku="ABC", quantity=1, unit_price_cents=100)],
+        )
+
+        processing = update_order_status_for(
+            "user-a", order.order_id, OrderStatus.PROCESSING
+        )
+        self.assertIs(
+            update_order_status_for(
+                "user-a", order.order_id, OrderStatus.PROCESSING
+            ),
+            processing,
+        )
+        update_order_status_for("user-a", order.order_id, OrderStatus.SHIPPED)
+        delivered = update_order_status_for(
+            "user-a", order.order_id, OrderStatus.DELIVERED
+        )
+        self.assertEqual(delivered.status, OrderStatus.DELIVERED)
+
+    def test_invalid_status_transition_fails(self) -> None:
+        order = create_order_for(
+            "user-a",
+            "Ada",
+            [OrderItem(sku="ABC", quantity=1, unit_price_cents=100)],
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "Cannot move an order from pending to shipped"
+        ):
+            update_order_status_for("user-a", order.order_id, OrderStatus.SHIPPED)
+
+    def test_item_validation_rejects_invalid_values(self) -> None:
+        invalid_items = (
+            {"sku": "spaces are invalid", "quantity": 1, "unit_price_cents": 1},
+            {"sku": "ABC", "quantity": 0, "unit_price_cents": 1},
+            {"sku": "ABC", "quantity": 1, "unit_price_cents": -1},
+        )
+        for item in invalid_items:
+            with self.subTest(item=item), self.assertRaises(ValidationError):
+                OrderItem.model_validate(item)
+
+        with self.assertRaisesRegex(ValueError, "at least one item"):
+            create_order_for("user-a", "Ada", [])
+
+
+class ServerContractTests(unittest.TestCase):
+    def test_server_requires_user_scope_and_exposes_only_order_tools(self) -> None:
+        environment = {
+            "AZURE_TENANT_ID": "11111111-1111-1111-1111-111111111111",
+            "ENTRA_SERVER_CLIENT_ID": "22222222-2222-2222-2222-222222222222",
+            "MCP_SERVER_URL": "https://orders.example.test",
+        }
+        with patch.dict("os.environ", environment, clear=False):
+            mcp = server.create_server()
+            tools = asyncio.run(mcp.list_tools())
+
+        self.assertEqual(
+            {tool.name for tool in tools},
+            {
+                "list_orders",
+                "get_order",
+                "create_order",
+                "update_order_status",
+            },
+        )
+        self.assertEqual(mcp.auth.token_verifier.required_scopes, ["Mcp.Tools.ReadWrite"])
+        for tool in tools:
+            self.assertNotIn("access_token", tool.parameters.get("properties", {}))
+
+
+class FakeMsalApp:
+    def __init__(self, *_: object, **__: object) -> None:
+        pass
+
+    def initiate_auth_code_flow(self, **_: object) -> dict[str, str]:
+        return {"auth_uri": "https://login.example/authorize", "state": "state"}
+
+    def acquire_token_by_auth_code_flow(
+        self, _: object, __: object
+    ) -> dict[str, object]:
+        return {
+            "access_token": "mcp-user-token",
+            "id_token_claims": {"name": "Ada"},
+        }
+
+    def get_accounts(self) -> list[dict[str, str]]:
+        return [{"home_account_id": "ada"}]
+
+    def acquire_token_silent(self, *_: object, **__: object) -> dict[str, str]:
+        return {"access_token": "mcp-user-token"}
+
+
+class FakeCredential:
+    def __init__(self, *_: object, **__: object) -> None:
+        pass
+
+    async def __aenter__(self) -> FakeCredential:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        pass
+
+
+class FakeAgent:
+    authorization = ""
+    message = ""
+
+    def __init__(self, *_: object, tools: list[object], **__: object) -> None:
+        self.tools = tools
+
+    async def __aenter__(self) -> FakeAgent:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        pass
+
+    def create_session(self, **_: object) -> object:
+        return object()
+
+    async def run(self, message: str, **_: object) -> SimpleNamespace:
+        FakeAgent.authorization = str(
+            self.tools[0]._httpx_client.headers["Authorization"]
+        )
+        FakeAgent.message = message
+        return SimpleNamespace(text="You have one pending order.")
+
+
+class ChatTests(unittest.TestCase):
+    def settings(self, token_file: Path) -> Settings:
+        return Settings(
+            tenant_id="11111111-1111-1111-1111-111111111111",
+            client_id="22222222-2222-2222-2222-222222222222",
+            redirect_uri="https://orders.example.test/auth/callback",
+            app_url="https://orders.example.test",
+            mcp_scope="api://server/Mcp.Tools.ReadWrite",
+            mcp_endpoint="https://orders.example.test/mcp",
+            foundry_project_endpoint="https://foundry.example.test",
+            foundry_model="gpt-5.6-terra",
+            token_file=token_file,
+        )
+
+    def test_workload_assertion_and_chat_input_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "token"
+            token_file.write_text(" assertion \n", encoding="utf-8")
+            self.assertEqual(_workload_assertion(self.settings(token_file)), "assertion")
+
+        self.assertEqual(ChatRequest(message=" list orders ").message, " list orders ")
+        with self.assertRaises(ValidationError):
+            ChatRequest(message="")
+
+    def test_live_client_flow_forwards_user_token_to_agent_mcp_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self.settings(Path(directory) / "token")
+            with (
+                patch("src.chat.ConfidentialClientApplication", FakeMsalApp),
+                patch("src.chat.WorkloadIdentityCredential", FakeCredential),
+                patch("src.chat.FoundryChatClient", lambda **_: object()),
+                patch("src.chat.Agent", FakeAgent),
+                TestClient(
+                    create_app(settings),
+                    base_url="https://orders.example.test",
+                    follow_redirects=False,
+                ) as client,
+            ):
+                login = client.get("/login")
+                self.assertEqual(login.status_code, 302)
+                self.assertEqual(login.headers["location"], "https://login.example/authorize")
+
+                callback = client.post(
+                    "/auth/callback",
+                    data={"state": "state", "code": "code"},
+                )
+                self.assertEqual(callback.status_code, 303)
+
+                page = client.get("/")
+                self.assertIn("overflow-y: auto", page.text)
+                self.assertIn("messages.scrollTop = messages.scrollHeight", page.text)
+                csrf_match = re.search(r'const csrf = "([^"]+)"', page.text)
+                self.assertIsNotNone(csrf_match)
+                csrf = csrf_match.group(1)
+
+                response = client.post(
+                    "/api/chat",
+                    headers={"X-CSRF-Token": csrf},
+                    json={"message": "What orders do I have?"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["response"], "You have one pending order.")
+        self.assertEqual(FakeAgent.authorization, "Bearer mcp-user-token")
+        self.assertEqual(FakeAgent.message, "What orders do I have?")
+
+    def test_unauthenticated_and_csrf_requests_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TestClient(
+                create_app(self.settings(Path(directory) / "token")),
+                base_url="https://orders.example.test",
+            ) as client:
+                response = client.post("/api/chat", json={"message": "hello"})
+        self.assertEqual(response.status_code, 401)
+
+
+class DeploymentContractTests(unittest.TestCase):
+    def test_bicep_declares_two_apps_foundry_and_native_consent(self) -> None:
+        bicep = (ROOT / "infra" / "main.bicep").read_text(encoding="utf-8")
+        self.assertIn("Microsoft.CognitiveServices/accounts/projects@2025-06-01", bicep)
+        self.assertIn("var modelName = 'gpt-5.6-terra'", bicep)
+        self.assertIn("Microsoft.Graph/oauth2PermissionGrants@v1.0", bicep)
+        self.assertIn("'${appUrl}/auth/callback'", bicep)
+        self.assertIn("isFallbackPublicClient: false", bicep)
+        self.assertIn("redirectUris: []", bicep)
+
+    def test_azd_uses_two_aks_services_without_python_deployer(self) -> None:
+        azure_yaml = (ROOT / "azure.yaml").read_text(encoding="utf-8")
+        self.assertIn("  mcp:\n", azure_yaml)
+        self.assertIn("  chat:\n", azure_yaml)
+        self.assertIn("host: aks", azure_yaml)
+        self.assertIn("helm upgrade --install", azure_yaml)
+        self.assertFalse((ROOT / "scripts" / "deploy.py").exists())
+
+    def test_ingress_routes_chat_and_mcp_separately(self) -> None:
+        ingress = (ROOT / "k8s" / "chat" / "ingress.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("path: /mcp", ingress)
+        self.assertIn("name: fastmcp-orders", ingress)
+        self.assertIn("path: /", ingress)
+        self.assertIn("name: order-agent-chat", ingress)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,49 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: orders
+resources:
+- serviceaccount.yaml
+- deployment.yaml
+- service.yaml
+- clusterissuer.yaml
+- ingress.yaml
+configMapGenerator:
+- envs:
+  - .env
+  name: chat-config
+replacements:
+- source:
+    fieldPath: data.ENTRA_CLIENT_CLIENT_ID
+    kind: ConfigMap
+    name: chat-config
+  targets:
+  - fieldPaths:
+    - metadata.annotations.[azure.workload.identity/client-id]
+    select:
+      kind: ServiceAccount
+      name: order-agent-chat
+- source:
+    fieldPath: data.AZURE_TENANT_ID
+    kind: ConfigMap
+    name: chat-config
+  targets:
+  - fieldPaths:
+    - metadata.annotations.[azure.workload.identity/tenant-id]
+    select:
+      kind: ServiceAccount
+      name: order-agent-chat
+- source:
+    fieldPath: data.APP_HOST
+    kind: ConfigMap
+    name: chat-config
+  targets:
+  - fieldPaths:
+    - spec.rules.0.host
+    - spec.tls.0.hosts.0
+    select:
+      kind: Ingress
+      name: order-agent
+images:
+- name: chat-image
+  newName: acrfwx3kpmaheiky.azurecr.io/order-agent-chat
+  newTag: azd-deploy-1784668727

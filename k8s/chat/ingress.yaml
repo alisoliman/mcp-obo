@@ -1,0 +1,40 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: order-agent
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - replace-me
+      secretName: order-agent-tls
+  rules:
+    - host: replace-me
+      http:
+        paths:
+          - path: /.well-known/oauth-protected-resource/mcp
+            pathType: Exact
+            backend:
+              service:
+                name: fastmcp-orders
+                port:
+                  name: http
+          - path: /mcp
+            pathType: Prefix
+            backend:
+              service:
+                name: fastmcp-orders
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: order-agent-chat
+                port:
+                  name: http

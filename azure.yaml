@@ -1,0 +1,109 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: fastmcp-order-aks
+metadata:
+  template: fastmcp-order-aks@0.2.0
+
+infra:
+  provider: bicep
+  path: infra
+
+hooks:
+  preprovision:
+    posix:
+      shell: sh
+      interactive: false
+      run: azd config set alpha.aks.kustomize on
+  predeploy:
+    posix:
+      shell: sh
+      interactive: false
+      run: |
+        az aks get-credentials \
+          --subscription "$AZURE_SUBSCRIPTION_ID" \
+          --resource-group "$AZURE_RESOURCE_GROUP" \
+          --name "$AZURE_AKS_CLUSTER_NAME" \
+          --overwrite-existing
+        kubelogin convert-kubeconfig --login azurecli
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx --force-update
+        helm repo add jetstack https://charts.jetstack.io --force-update
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+          --version 4.15.1 \
+          --namespace ingress-nginx \
+          --create-namespace \
+          --set controller.service.loadBalancerIP="$INGRESS_IP" \
+          --set-string controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-resource-group"="$INGRESS_PUBLIC_IP_RESOURCE_GROUP" \
+          --set-string controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"="/healthz" \
+          --atomic \
+          --wait \
+          --timeout 10m
+        helm upgrade --install cert-manager jetstack/cert-manager \
+          --version v1.21.0 \
+          --namespace cert-manager \
+          --create-namespace \
+          --set crds.enabled=true \
+          --wait \
+          --timeout 10m
+
+services:
+  mcp:
+    project: .
+    language: python
+    host: aks
+    resourceGroup: ${AZURE_RESOURCE_GROUP}
+    resourceName: ${AZURE_AKS_CLUSTER_NAME}
+    docker:
+      path: ./Dockerfile.mcp
+      context: .
+      registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}
+      image: ${MCP_IMAGE_NAME}
+      remoteBuild: true
+    k8s:
+      namespace: orders
+      deployment:
+        name: fastmcp-orders
+      service:
+        name: fastmcp-orders
+      kustomize:
+        dir: ./k8s/mcp
+        edits:
+          - set image mcp-image=${SERVICE_MCP_IMAGE_NAME}
+        env:
+          AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+          ENTRA_SERVER_CLIENT_ID: ${ENTRA_SERVER_CLIENT_ID}
+          MCP_SERVER_URL: ${MCP_SERVER_URL}
+
+  chat:
+    project: .
+    language: python
+    host: aks
+    resourceGroup: ${AZURE_RESOURCE_GROUP}
+    resourceName: ${AZURE_AKS_CLUSTER_NAME}
+    docker:
+      path: ./Dockerfile.chat
+      context: .
+      registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}
+      image: ${CHAT_IMAGE_NAME}
+      remoteBuild: true
+    k8s:
+      namespace: orders
+      deployment:
+        name: order-agent-chat
+      service:
+        name: order-agent-chat
+      ingress:
+        name: order-agent
+      kustomize:
+        dir: ./k8s/chat
+        edits:
+          - set image chat-image=${SERVICE_CHAT_IMAGE_NAME}
+        env:
+          AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+          ENTRA_CLIENT_CLIENT_ID: ${ENTRA_CLIENT_CLIENT_ID}
+          OAUTH_REDIRECT_URI: ${OAUTH_REDIRECT_URI}
+          APP_HOST: ${APP_HOST}
+          APP_URL: ${APP_URL}
+          MCP_SCOPE: ${MCP_SCOPE}
+          MCP_ENDPOINT: ${MCP_ENDPOINT}
+          FOUNDRY_PROJECT_ENDPOINT: ${FOUNDRY_PROJECT_ENDPOINT}
+          FOUNDRY_MODEL_DEPLOYMENT_NAME: ${FOUNDRY_MODEL_DEPLOYMENT_NAME}
