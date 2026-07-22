@@ -1,0 +1,968 @@
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react"
+import {
+  AlertCircle,
+  ArrowUp,
+  Bot,
+  Boxes,
+  ChevronDown,
+  Database,
+  KeyRound,
+  LogOut,
+  Moon,
+  Network,
+  ShieldCheck,
+  Sun,
+  UserRound,
+  Wrench,
+} from "lucide-react"
+
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { Badge } from "@/components/ui/badge"
+import { Bubble, BubbleContent } from "@/components/ui/bubble"
+import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupText,
+  InputGroupTextarea,
+} from "@/components/ui/input-group"
+import {
+  Message,
+  MessageAvatar,
+  MessageContent,
+  MessageHeader,
+} from "@/components/ui/message"
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+} from "@/components/ui/message-scroller"
+import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import { cn } from "@/lib/utils"
+
+const MarkdownResponse = lazy(() => import("@/components/markdown-response"))
+
+type Theme = "light" | "dark"
+type ChatRole = "user" | "assistant" | "error"
+
+type ChatMessage = {
+  id: string
+  role: ChatRole
+  content: string
+}
+
+type SessionProfile = {
+  name: string
+  username?: string
+}
+
+type SessionInfo = {
+  authenticated: boolean
+  profile?: SessionProfile
+  csrfToken?: string
+  historyKey?: string
+  model: string
+  mcp: {
+    name: string
+    tools: string[]
+  }
+}
+
+const HISTORY_PREFIX = "order-agent-chat-history"
+const THEME_KEY = "order-agent-theme"
+const suggestions = [
+  "What orders do I have?",
+  "Create an order for two DEMO-001 items at 1299 cents each.",
+  "Which order can I move to processing?",
+]
+
+const identitySteps = [
+  {
+    icon: UserRound,
+    label: "Signed-in user",
+    detail: "Delegated Entra session",
+    tone: "primary",
+  },
+  {
+    icon: Bot,
+    label: "Agent runtime",
+    detail: "Microsoft Foundry",
+    tone: "accent",
+  },
+  {
+    icon: Wrench,
+    label: "Order MCP",
+    detail: "User token forwarded",
+    tone: "accent",
+  },
+  {
+    icon: Database,
+    label: "Microsoft Graph",
+    detail: "OBO resolves /me",
+    tone: "primary",
+  },
+] as const
+
+function storedTheme(): Theme {
+  const saved = localStorage.getItem(THEME_KEY)
+  if (saved === "light" || saved === "dark") {
+    return saved
+  }
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light"
+}
+
+function useTheme() {
+  const [theme, setTheme] = useState<Theme>(storedTheme)
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark")
+    document.documentElement.style.colorScheme = theme
+    localStorage.setItem(THEME_KEY, theme)
+  }, [theme])
+
+  return {
+    theme,
+    toggle: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
+  }
+}
+
+function historyStorageKey(historyKey: string) {
+  return `${HISTORY_PREFIX}:${historyKey}`
+}
+
+function clearOtherHistories(activeKey?: string) {
+  const activeStorageKey = activeKey ? historyStorageKey(activeKey) : null
+  for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+    const key = sessionStorage.key(index)
+    if (
+      key?.startsWith(HISTORY_PREFIX) &&
+      key !== activeStorageKey
+    ) {
+      sessionStorage.removeItem(key)
+    }
+  }
+}
+
+function storedMessages(historyKey: string): ChatMessage[] {
+  try {
+    const value = sessionStorage.getItem(historyStorageKey(historyKey))
+    return value ? (JSON.parse(value) as ChatMessage[]) : []
+  } catch {
+    return []
+  }
+}
+
+function initials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("")
+}
+
+function BrandMark({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        "flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground",
+        className
+      )}
+      aria-hidden="true"
+    >
+      <Boxes className="size-4" />
+    </span>
+  )
+}
+
+function ThemeToggle({
+  theme,
+  onToggle,
+}: {
+  theme: Theme
+  onToggle: () => void
+}) {
+  const label = theme === "dark" ? "Use light theme" : "Use dark theme"
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label={label}
+          onClick={onToggle}
+        >
+          {theme === "dark" ? <Sun /> : <Moon />}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+function ConnectionStatus() {
+  return (
+    <span className="inline-flex items-center gap-2 text-xs font-medium text-muted-foreground">
+      <span className="relative flex size-2" aria-hidden="true">
+        <span className="absolute inline-flex size-full rounded-full bg-primary/30" />
+        <span className="relative inline-flex size-2 rounded-full bg-primary" />
+      </span>
+      Connected
+    </span>
+  )
+}
+
+function ContextRail({ session }: { session: SessionInfo }) {
+  return (
+    <aside className="hidden min-h-0 flex-col border-r bg-sidebar lg:flex">
+      <div className="flex h-16 items-center gap-3 border-b px-5">
+        <BrandMark />
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold">Order Agent Lab</p>
+          <p className="truncate text-xs text-muted-foreground">Delegated MCP OBO</p>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-5 py-6">
+        <p className="mb-5 text-xs font-medium text-muted-foreground">
+          Identity path
+        </p>
+        <ol className="relative space-y-1" aria-label="Delegated identity path">
+          {identitySteps.map((step, index) => {
+            const Icon = step.icon
+            return (
+              <li key={step.label} className="relative flex gap-3 pb-6">
+                {index < identitySteps.length - 1 && (
+                  <span
+                    className="absolute top-8 bottom-0 left-4 w-px bg-border"
+                    aria-hidden="true"
+                  />
+                )}
+                <span
+                  className={cn(
+                    "relative z-10 flex size-8 shrink-0 items-center justify-center rounded-md border bg-background",
+                    step.tone === "primary"
+                      ? "text-primary"
+                      : "text-[var(--protocol)]"
+                  )}
+                >
+                  <Icon className="size-4" />
+                </span>
+                <span className="min-w-0 pt-0.5">
+                  <span className="block text-sm font-medium">{step.label}</span>
+                  <span className="block text-xs leading-5 text-muted-foreground">
+                    {step.detail}
+                  </span>
+                </span>
+              </li>
+            )
+          })}
+        </ol>
+
+        <Separator className="my-2" />
+        <div className="space-y-4 pt-5">
+          <div>
+            <p className="text-xs font-medium text-muted-foreground">Model</p>
+            <p className="mt-1 text-sm font-medium">{session.model}</p>
+          </div>
+          <div>
+            <p className="text-xs font-medium text-muted-foreground">MCP tools</p>
+            <p className="mt-1 text-sm font-medium">
+              {session.mcp.tools.length} available
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="border-t px-5 py-4">
+        <div className="flex items-center justify-between">
+          <ConnectionStatus />
+          <ShieldCheck className="size-4 text-primary" aria-label="Secure path" />
+        </div>
+      </div>
+    </aside>
+  )
+}
+
+function TranscriptMessage({ message }: { message: ChatMessage }) {
+  const isUser = message.role === "user"
+  const isError = message.role === "error"
+
+  return (
+    <Message align={isUser ? "end" : "start"}>
+      <MessageAvatar>
+        <Avatar className="size-8">
+          <AvatarFallback
+            className={cn(
+              "text-xs",
+              isUser
+                ? "bg-primary text-primary-foreground"
+                : isError
+                  ? "bg-destructive/10 text-destructive"
+                  : "bg-[var(--protocol-soft)] text-[var(--protocol)]"
+            )}
+          >
+            {isUser ? <UserRound className="size-4" /> : <Bot className="size-4" />}
+          </AvatarFallback>
+        </Avatar>
+      </MessageAvatar>
+      <MessageContent>
+        <MessageHeader>
+          {isUser ? "You" : isError ? "System" : "Order Agent"}
+        </MessageHeader>
+        <Bubble
+          align={isUser ? "end" : "start"}
+          variant={isUser ? "tinted" : isError ? "destructive" : "ghost"}
+        >
+          <BubbleContent
+            className={cn(
+              !isUser && !isError && "text-[0.9375rem] leading-7",
+              isUser && "max-w-[42rem]"
+            )}
+          >
+            {isUser ? (
+              message.content
+            ) : isError ? (
+              <span role="alert">{message.content}</span>
+            ) : (
+              <Suspense fallback={<span>{message.content}</span>}>
+                <MarkdownResponse>{message.content}</MarkdownResponse>
+              </Suspense>
+            )}
+          </BubbleContent>
+        </Bubble>
+      </MessageContent>
+    </Message>
+  )
+}
+
+function PendingMessage() {
+  return (
+    <Message>
+      <MessageAvatar>
+        <Avatar className="size-8">
+          <AvatarFallback className="bg-[var(--protocol-soft)] text-[var(--protocol)]">
+            <Bot className="size-4" />
+          </AvatarFallback>
+        </Avatar>
+      </MessageAvatar>
+      <MessageContent>
+        <MessageHeader>Order Agent</MessageHeader>
+        <div
+          className="space-y-2 px-0 py-1"
+          role="status"
+          aria-label="Order Agent is working"
+        >
+          <Skeleton className="h-3 w-52" />
+          <Skeleton className="h-3 w-36" />
+        </div>
+      </MessageContent>
+    </Message>
+  )
+}
+
+function EmptyConversation({
+  onSuggestion,
+  disabled,
+}: {
+  onSuggestion: (message: string) => void
+  disabled: boolean
+}) {
+  return (
+    <div className="flex min-h-full min-w-0 flex-1 items-center overflow-hidden">
+      <div className="mx-auto w-full min-w-0 max-w-2xl px-5 py-10 md:px-8">
+        <div className="mb-6 flex size-10 items-center justify-center rounded-lg border bg-background text-primary">
+          <Network className="size-5" />
+        </div>
+        <h1 className="text-xl font-semibold tracking-tight text-balance">
+          Ask the live identity path
+        </h1>
+        <p className="mt-2 max-w-[60ch] text-sm leading-6 text-muted-foreground text-pretty">
+          Each order request runs through Foundry, the Order MCP server, and a
+          delegated Graph OBO exchange for your signed-in identity.
+        </p>
+        <div
+          className="mt-7 grid gap-2 sm:flex sm:flex-wrap"
+          aria-label="Suggested prompts"
+        >
+          {suggestions.map((suggestion) => (
+            <Button
+              key={suggestion}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-auto w-full max-w-full justify-start py-2 text-left whitespace-normal sm:w-auto"
+              disabled={disabled}
+              onClick={() => onSuggestion(suggestion)}
+            >
+              {suggestion}
+            </Button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PromptComposer({
+  value,
+  pending,
+  error,
+  onChange,
+  onSubmit,
+}: {
+  value: string
+  pending: boolean
+  error: string | null
+  onChange: (value: string) => void
+  onSubmit: () => void
+}) {
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (!pending) {
+      inputRef.current?.focus()
+    }
+  }, [pending])
+
+  return (
+    <div className="border-t bg-background px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] md:px-8">
+      <div className="mx-auto max-w-3xl">
+        {error && (
+          <Alert variant="destructive" className="mb-3">
+            <AlertCircle />
+            <AlertTitle>Request failed</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            onSubmit()
+          }}
+        >
+          <label className="sr-only" htmlFor="order-agent-prompt">
+            Message Order Agent
+          </label>
+          <InputGroup className="min-h-24 rounded-xl bg-background shadow-[0_-1px_18px_oklch(0.18_0.018_250/0.05)] has-disabled:opacity-100">
+            <InputGroupTextarea
+              ref={inputRef}
+              id="order-agent-prompt"
+              value={value}
+              maxLength={4000}
+              rows={2}
+              disabled={pending}
+              placeholder="Ask about your orders..."
+              className="min-h-14 field-sizing-content px-3 pt-3 text-[0.9375rem]"
+              onChange={(event) => onChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault()
+                  event.currentTarget.form?.requestSubmit()
+                }
+              }}
+            />
+            <InputGroupAddon
+              align="block-end"
+              className="justify-between border-t px-2.5"
+            >
+              <InputGroupText className="text-xs">
+                <KeyRound className="size-3.5" />
+                Runs as your identity
+              </InputGroupText>
+              <InputGroupButton
+                type="submit"
+                variant="default"
+                size="icon-sm"
+                aria-label={pending ? "Waiting for response" : "Send message"}
+                disabled={pending || !value.trim()}
+              >
+                <ArrowUp />
+              </InputGroupButton>
+            </InputGroupAddon>
+          </InputGroup>
+        </form>
+        <p className="mt-2 text-center text-xs text-muted-foreground">
+          Enter to send · Shift + Enter for a new line
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function UserMenu({
+  profile,
+  theme,
+  onTheme,
+  onLogout,
+}: {
+  profile: SessionProfile
+  theme: Theme
+  onTheme: () => void
+  onLogout: () => void
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" className="h-9 gap-2 px-2" aria-label="User menu">
+          <Avatar className="size-7">
+            <AvatarFallback className="bg-primary text-xs text-primary-foreground">
+              {initials(profile.name)}
+            </AvatarFallback>
+          </Avatar>
+          <span className="hidden max-w-36 truncate text-sm sm:inline">
+            {profile.name}
+          </span>
+          <ChevronDown className="size-3.5 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel className="space-y-0.5">
+          <span className="block truncate text-foreground">{profile.name}</span>
+          {profile.username && (
+            <span className="block truncate font-normal">{profile.username}</span>
+          )}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onTheme}>
+          {theme === "dark" ? <Sun /> : <Moon />}
+          {theme === "dark" ? "Light theme" : "Dark theme"}
+        </DropdownMenuItem>
+        <DropdownMenuItem variant="destructive" onSelect={onLogout}>
+          <LogOut />
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function SignedOut({
+  session,
+  theme,
+  onTheme,
+}: {
+  session: SessionInfo
+  theme: Theme
+  onTheme: () => void
+}) {
+  return (
+    <div className="min-h-dvh bg-background">
+      <header className="mx-auto flex h-16 max-w-6xl items-center justify-between border-b px-5 md:px-8">
+        <div className="flex items-center gap-3">
+          <BrandMark />
+          <div>
+            <p className="text-sm font-semibold">Order Agent Lab</p>
+            <p className="text-xs text-muted-foreground">Delegated MCP OBO</p>
+          </div>
+        </div>
+        <ThemeToggle theme={theme} onToggle={onTheme} />
+      </header>
+
+      <main className="mx-auto grid max-w-6xl gap-12 px-5 py-14 md:px-8 lg:grid-cols-[minmax(0,1fr)_25rem] lg:items-center lg:py-24">
+        <section>
+          <Badge variant="outline" className="mb-5">
+            Live architecture sample
+          </Badge>
+          <h1 className="max-w-2xl text-3xl font-semibold tracking-[-0.025em] text-balance md:text-4xl">
+            Follow one user identity through an agent and its tools.
+          </h1>
+          <p className="mt-5 max-w-[65ch] text-base leading-7 text-muted-foreground text-pretty">
+            Sign in to use a Microsoft Agent Framework client backed by{" "}
+            {session.model}. Every order tool call forwards your delegated token
+            to a separate FastMCP server, which completes OBO to Microsoft Graph.
+          </p>
+          <Button asChild size="lg" className="mt-8">
+            <a href="/login">
+              <ShieldCheck />
+              Sign in with Microsoft
+            </a>
+          </Button>
+          <p className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+            <KeyRound className="size-3.5" />
+            OAuth tokens stay server-side and are never sent to this browser.
+          </p>
+        </section>
+
+        <section
+          className="rounded-xl border bg-[var(--workbench)] p-6"
+          aria-labelledby="identity-path-heading"
+        >
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h2 id="identity-path-heading" className="text-sm font-semibold">
+                Identity path
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                One delegated request, four boundaries
+              </p>
+            </div>
+            <ConnectionStatus />
+          </div>
+          <Separator className="my-5" />
+          <ol className="space-y-4">
+            {identitySteps.map((step, index) => {
+              const Icon = step.icon
+              return (
+                <li key={step.label} className="flex items-center gap-3">
+                  <span className="flex size-8 items-center justify-center rounded-md border bg-background text-[var(--protocol)]">
+                    <Icon className="size-4" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium">{step.label}</span>
+                    <span className="block text-xs text-muted-foreground">
+                      {step.detail}
+                    </span>
+                  </span>
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    0{index + 1}
+                  </span>
+                </li>
+              )
+            })}
+          </ol>
+        </section>
+      </main>
+    </div>
+  )
+}
+
+function LoadingScreen() {
+  return (
+    <div className="flex min-h-dvh items-center justify-center bg-background px-6">
+      <div className="w-full max-w-sm space-y-5" role="status">
+        <div className="flex items-center gap-3">
+          <BrandMark />
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-3 w-24" />
+          </div>
+        </div>
+        <Skeleton className="h-24 w-full rounded-xl" />
+        <span className="sr-only">Loading Order Agent</span>
+      </div>
+    </div>
+  )
+}
+
+function BootstrapError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex min-h-dvh items-center justify-center bg-background px-5">
+      <Alert variant="destructive" className="max-w-lg">
+        <AlertCircle />
+        <AlertTitle>Order Agent could not start</AlertTitle>
+        <AlertDescription className="mt-2">
+          The browser could not read the current application session.
+          <Button variant="outline" size="sm" className="mt-4" onClick={onRetry}>
+            Try again
+          </Button>
+        </AlertDescription>
+      </Alert>
+    </div>
+  )
+}
+
+function ChatWorkspace({
+  session,
+  theme,
+  onTheme,
+}: {
+  session: SessionInfo & {
+    authenticated: true
+    profile: SessionProfile
+    csrfToken: string
+    historyKey: string
+  }
+  theme: Theme
+  onTheme: () => void
+}) {
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    storedMessages(session.historyKey)
+  )
+  const [draft, setDraft] = useState("")
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [announcement, setAnnouncement] = useState("")
+
+  useEffect(() => {
+    sessionStorage.setItem(
+      historyStorageKey(session.historyKey),
+      JSON.stringify(messages)
+    )
+  }, [messages, session.historyKey])
+
+  const sendMessage = useCallback(
+    async (rawMessage: string) => {
+      const message = rawMessage.trim()
+      if (!message || pending) {
+        return
+      }
+
+      setDraft("")
+      setError(null)
+      setPending(true)
+      setAnnouncement("Order Agent is working")
+      setMessages((current) => [
+        ...current,
+        { id: crypto.randomUUID(), role: "user", content: message },
+      ])
+
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": session.csrfToken,
+          },
+          body: JSON.stringify({ message }),
+        })
+        const payload = (await response.json()) as {
+          response?: string
+          error?: string
+        }
+        if (response.status === 401) {
+          window.location.assign("/login")
+          return
+        }
+        if (!response.ok || !payload.response) {
+          throw new Error(payload.error || "The agent request failed.")
+        }
+        const responseText = payload.response
+        setMessages((current) => [
+          ...current,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: responseText,
+          },
+        ])
+        setAnnouncement("Order Agent response received")
+      } catch (requestError) {
+        const detail =
+          requestError instanceof Error
+            ? requestError.message
+            : "The agent request failed."
+        setError(detail)
+        setMessages((current) => [
+          ...current,
+          { id: crypto.randomUUID(), role: "error", content: detail },
+        ])
+        setAnnouncement("Order Agent request failed")
+      } finally {
+        setPending(false)
+      }
+    },
+    [pending, session.csrfToken]
+  )
+
+  const logout = useCallback(async () => {
+    try {
+      const response = await fetch("/logout", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-CSRF-Token": session.csrfToken },
+      })
+      const payload = (await response.json()) as {
+        logoutUrl?: string
+        error?: string
+      }
+      if (!response.ok || !payload.logoutUrl) {
+        throw new Error(payload.error || "Sign-out failed.")
+      }
+      sessionStorage.removeItem(historyStorageKey(session.historyKey))
+      window.location.assign(payload.logoutUrl)
+    } catch (logoutError) {
+      const detail =
+        logoutError instanceof Error ? logoutError.message : "Sign-out failed."
+      setError(detail)
+      setAnnouncement("Sign out failed")
+    }
+  }, [session.csrfToken, session.historyKey])
+
+  return (
+    <div className="grid h-dvh min-h-0 w-full overflow-hidden bg-background lg:grid-cols-[17rem_minmax(0,1fr)]">
+      <ContextRail session={session} />
+
+      <main className="flex min-h-0 min-w-0 w-full flex-col overflow-hidden">
+        <header className="flex h-16 shrink-0 items-center justify-between border-b px-4 md:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <BrandMark className="lg:hidden" />
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold">Order conversation</p>
+              <div className="mt-0.5 flex items-center gap-2 lg:hidden">
+                <span className="truncate text-xs text-muted-foreground">
+                  {session.model}
+                </span>
+                <span className="text-border" aria-hidden="true">
+                  /
+                </span>
+                <ConnectionStatus />
+              </div>
+              <p className="hidden truncate text-xs text-muted-foreground lg:block">
+                MCP tools run with {session.profile.name}&apos;s delegated identity
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="hidden sm:block">
+              <ThemeToggle theme={theme} onToggle={onTheme} />
+            </div>
+            <UserMenu
+              profile={session.profile}
+              theme={theme}
+              onTheme={onTheme}
+              onLogout={() => void logout()}
+            />
+          </div>
+        </header>
+
+        <MessageScrollerProvider autoScroll>
+          <MessageScroller className="flex-1">
+            <MessageScrollerViewport>
+              <MessageScrollerContent
+                className="mx-auto w-full max-w-3xl px-4 py-6 md:px-8"
+                role="log"
+                aria-label="Order conversation"
+                aria-live="polite"
+                aria-relevant="additions text"
+              >
+                {messages.length === 0 ? (
+                  <EmptyConversation
+                    disabled={pending}
+                    onSuggestion={(message) => void sendMessage(message)}
+                  />
+                ) : (
+                  messages.map((message) => (
+                    <MessageScrollerItem
+                      key={message.id}
+                      messageId={message.id}
+                      scrollAnchor={message.role === "user"}
+                    >
+                      <TranscriptMessage message={message} />
+                    </MessageScrollerItem>
+                  ))
+                )}
+                {pending && (
+                  <MessageScrollerItem messageId="pending">
+                    <PendingMessage />
+                  </MessageScrollerItem>
+                )}
+              </MessageScrollerContent>
+            </MessageScrollerViewport>
+            <MessageScrollerButton />
+          </MessageScroller>
+        </MessageScrollerProvider>
+
+        <PromptComposer
+          value={draft}
+          pending={pending}
+          error={error}
+          onChange={setDraft}
+          onSubmit={() => void sendMessage(draft)}
+        />
+        <div className="sr-only" role="status" aria-live="polite">
+          {announcement}
+        </div>
+      </main>
+    </div>
+  )
+}
+
+function App() {
+  const { theme, toggle } = useTheme()
+  const [session, setSession] = useState<SessionInfo | null>(null)
+  const [bootstrapError, setBootstrapError] = useState(false)
+
+  const loadSession = useCallback(async () => {
+    setBootstrapError(false)
+    try {
+      const response = await fetch("/api/session", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      })
+      if (!response.ok) {
+        throw new Error("Session bootstrap failed")
+      }
+      const payload = (await response.json()) as SessionInfo
+      clearOtherHistories(
+        payload.authenticated && payload.historyKey
+          ? payload.historyKey
+          : undefined
+      )
+      setSession(payload)
+    } catch {
+      setBootstrapError(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadSession()
+  }, [loadSession])
+
+  if (bootstrapError) {
+    return <BootstrapError onRetry={() => void loadSession()} />
+  }
+  if (!session) {
+    return <LoadingScreen />
+  }
+  if (
+    session.authenticated &&
+    session.profile &&
+    session.csrfToken &&
+    session.historyKey
+  ) {
+    return (
+      <ChatWorkspace
+        session={{
+          ...session,
+          authenticated: true,
+          profile: session.profile,
+          csrfToken: session.csrfToken,
+          historyKey: session.historyKey,
+        }}
+        theme={theme}
+        onTheme={toggle}
+      />
+    )
+  }
+  return <SignedOut session={session} theme={theme} onTheme={toggle} />
+}
+
+export default function Root() {
+  return (
+    <TooltipProvider>
+      <App />
+    </TooltipProvider>
+  )
+}
