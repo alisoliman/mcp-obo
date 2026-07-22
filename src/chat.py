@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import os
 import secrets
 import time
@@ -12,7 +14,13 @@ from urllib.parse import urlencode
 
 import httpx
 import uvicorn
-from agent_framework import Agent, AgentSession, MCPStreamableHTTPTool
+from agent_framework import (
+    Agent,
+    AgentSession,
+    FunctionInvocationContext,
+    FunctionMiddleware,
+    MCPStreamableHTTPTool,
+)
 from agent_framework.foundry import FoundryChatClient
 from azure.identity.aio import WorkloadIdentityCredential
 from msal import ConfidentialClientApplication, SerializableTokenCache
@@ -25,6 +33,7 @@ from starlette.responses import (
     PlainTextResponse,
     RedirectResponse,
     Response,
+    StreamingResponse,
 )
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
@@ -35,11 +44,22 @@ SESSION_TTL_SECONDS = 8 * 60 * 60
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FRONTEND_DIST = ROOT / "frontend" / "dist"
 ORDER_TOOLS = {
+    "who_am_i",
     "list_orders",
     "get_order",
     "create_order",
     "update_order_status",
 }
+logger = logging.getLogger(__name__)
+_SENSITIVE_EVENT_KEYS = (
+    "access_token",
+    "assertion",
+    "authorization",
+    "client_secret",
+    "password",
+    "refresh_token",
+    "token",
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +116,92 @@ class BrowserSession:
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4_000)
+
+
+def _safe_event_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 5:
+        return "[truncated]"
+    if isinstance(value, BaseModel):
+        return _safe_event_value(value.model_dump(mode="json"), depth=depth + 1)
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "[redacted]"
+                if any(term in str(key).lower() for term in _SENSITIVE_EVENT_KEYS)
+                else _safe_event_value(item, depth=depth + 1)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_safe_event_value(item, depth=depth + 1) for item in value[:50]]
+    if isinstance(value, str):
+        return value if len(value) <= 4_000 else f"{value[:4_000]}…"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _safe_event_value(str(value), depth=depth + 1)
+
+
+def _sse_event(event: str, payload: dict[str, Any]) -> str:
+    data = json.dumps(
+        _safe_event_value(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def _sse_text_event(event: str, text: str) -> str:
+    data = json.dumps(
+        {"text": text},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+class ToolEventMiddleware(FunctionMiddleware):
+    def __init__(self, events: asyncio.Queue) -> None:
+        self.events = events
+
+    async def process(self, context: FunctionInvocationContext, call_next) -> None:
+        event_id = secrets.token_urlsafe(9)
+        await self.events.put(
+            (
+                "tool.started",
+                {
+                    "id": event_id,
+                    "name": context.function.name,
+                    "input": context.arguments,
+                },
+            )
+        )
+        try:
+            await call_next()
+        except BaseException:
+            await self.events.put(
+                (
+                    "tool.completed",
+                    {
+                        "id": event_id,
+                        "name": context.function.name,
+                        "status": "error",
+                        "output": "Tool call failed.",
+                    },
+                )
+            )
+            raise
+        await self.events.put(
+            (
+                "tool.completed",
+                {
+                    "id": event_id,
+                    "name": context.function.name,
+                    "status": "completed",
+                    "input": context.arguments,
+                    "output": context.result,
+                },
+            )
+        )
 
 
 def _workload_assertion(settings: Settings) -> str:
@@ -278,7 +384,7 @@ def create_app(
             return None
         return str(result["access_token"])
 
-    async def chat(request: Request) -> JSONResponse:
+    async def chat_stream(request: Request) -> Response:
         active = current_session(request)
         if active is None:
             return JSONResponse({"error": "Sign-in required"}, status_code=401)
@@ -293,57 +399,154 @@ def create_app(
         except (ValidationError, json.JSONDecodeError):
             return JSONResponse({"error": "A message of 1-4000 characters is required"}, status_code=400)
 
-        async with session.lock:
-            token = await delegated_token(session)
-            if token is None:
-                return JSONResponse({"error": "Sign-in expired"}, status_code=401)
-
-            async with (
-                WorkloadIdentityCredential(
-                    tenant_id=config.tenant_id,
-                    client_id=config.client_id,
-                    token_file_path=str(config.token_file),
-                ) as credential,
-                httpx.AsyncClient(
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=httpx.Timeout(30, read=300),
-                    follow_redirects=True,
-                ) as mcp_http,
-            ):
-                mcp = MCPStreamableHTTPTool(
-                    name="orders",
-                    description="Order tools for the signed-in user.",
-                    url=config.mcp_endpoint,
-                    allowed_tools=ORDER_TOOLS,
-                    approval_mode="never_require",
-                    load_prompts=False,
-                    http_client=mcp_http,
-                )
-                agent = Agent(
-                    client=FoundryChatClient(
-                        project_endpoint=config.foundry_project_endpoint,
-                        model=config.foundry_model,
-                        credential=credential,
-                    ),
-                    name="OrderAgent",
-                    instructions=(
-                        "You help the signed-in user with their orders. "
-                        "Use the order tools for order facts and never invent order data. "
-                        "Only create an order or change status when the user explicitly asks."
-                    ),
-                    tools=[mcp],
-                )
-                async with agent:
-                    if session.agent_session is None:
-                        session.agent_session = agent.create_session(
-                            session_id=session_id
-                        )
-                    result = await agent.run(
-                        payload.message,
-                        session=session.agent_session,
+        async def event_stream():
+            update_task: asyncio.Task | None = None
+            tool_task: asyncio.Task | None = None
+            await session.lock.acquire()
+            try:
+                token = await delegated_token(session)
+                if token is None:
+                    yield _sse_event(
+                        "response.error",
+                        {
+                            "code": "auth_required",
+                            "message": "Sign-in expired.",
+                        },
                     )
+                    return
 
-        return JSONResponse({"response": result.text})
+                yield _sse_event("response.started", {})
+                tool_events: asyncio.Queue = asyncio.Queue()
+                tool_middleware = ToolEventMiddleware(tool_events)
+                async with (
+                    WorkloadIdentityCredential(
+                        tenant_id=config.tenant_id,
+                        client_id=config.client_id,
+                        token_file_path=str(config.token_file),
+                    ) as credential,
+                    httpx.AsyncClient(
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=httpx.Timeout(30, read=300),
+                        follow_redirects=True,
+                    ) as mcp_http,
+                ):
+                    mcp = MCPStreamableHTTPTool(
+                        name="orders",
+                        description="Order tools for the signed-in user.",
+                        url=config.mcp_endpoint,
+                        allowed_tools=ORDER_TOOLS,
+                        approval_mode="never_require",
+                        load_prompts=False,
+                        http_client=mcp_http,
+                    )
+                    agent = Agent(
+                        client=FoundryChatClient(
+                            project_endpoint=config.foundry_project_endpoint,
+                            model=config.foundry_model,
+                            credential=credential,
+                        ),
+                        name="OrderAgent",
+                        instructions=(
+                            "You help the signed-in user with their orders. "
+                            "Use the order tools for order facts and never invent order data. "
+                            "Only create an order or change status when the user explicitly asks. "
+                            "When asked to prove identity or OBO, call who_am_i and report its "
+                            "display name, identity fingerprint, and evidence exactly."
+                        ),
+                        tools=[mcp],
+                    )
+                    async with agent:
+                        if session.agent_session is None:
+                            session.agent_session = agent.create_session(
+                                session_id=session_id
+                            )
+                        response_stream = agent.run(
+                            payload.message,
+                            session=session.agent_session,
+                            stream=True,
+                            middleware=[tool_middleware],
+                        )
+                        updates = response_stream.__aiter__()
+                        update_task = asyncio.create_task(anext(updates))
+                        tool_task = asyncio.create_task(tool_events.get())
+                        stream_open = True
+
+                        while stream_open:
+                            done, _ = await asyncio.wait(
+                                {update_task, tool_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+
+                            if tool_task in done:
+                                event_name, event_payload = tool_task.result()
+                                yield _sse_event(event_name, event_payload)
+                                tool_task = asyncio.create_task(tool_events.get())
+
+                            if update_task in done:
+                                try:
+                                    update = update_task.result()
+                                except StopAsyncIteration:
+                                    stream_open = False
+                                    update_task = None
+                                else:
+                                    for content in update.contents:
+                                        content_type = str(content.type)
+                                        if content_type == "text" and content.text:
+                                            yield _sse_text_event(
+                                                "response.delta",
+                                                content.text,
+                                            )
+                                        elif content_type == "error":
+                                            yield _sse_event(
+                                                "response.error",
+                                                {
+                                                    "message": (
+                                                        "The agent request failed."
+                                                    )
+                                                },
+                                            )
+                                            return
+                                    update_task = asyncio.create_task(anext(updates))
+
+                        if tool_task is not None:
+                            tool_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await tool_task
+                            tool_task = None
+                        while not tool_events.empty():
+                            event_name, event_payload = tool_events.get_nowait()
+                            yield _sse_event(event_name, event_payload)
+
+                        final = await response_stream.get_final_response()
+                        yield _sse_text_event(
+                            "response.completed",
+                            final.text,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Streaming agent request failed")
+                yield _sse_event(
+                    "response.error",
+                    {"message": "The agent request failed."},
+                )
+            finally:
+                tasks = [task for task in (update_task, tool_task) if task is not None]
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                session.lock.release()
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     async def logout(request: Request) -> JSONResponse:
         active = current_session(request)
@@ -370,7 +573,7 @@ def create_app(
             Route("/login", login),
             Route("/auth/callback", auth_callback, methods=["POST"]),
             Route("/api/session", session_info),
-            Route("/api/chat", chat, methods=["POST"]),
+            Route("/api/chat/stream", chat_stream, methods=["POST"]),
             Route("/logout", logout, methods=["POST"]),
             Mount("/assets", app=StaticFiles(directory=assets_path), name="assets"),
         ],

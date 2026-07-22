@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from collections import defaultdict
 from enum import StrEnum
@@ -61,6 +62,14 @@ class GraphUser(BaseModel):
     user_principal_name: str | None = Field(default=None, alias="userPrincipalName")
 
 
+class IdentityProof(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    display_name: str
+    identity_fingerprint: str
+    evidence: str = "Microsoft Graph /me via OBO"
+
+
 _orders: dict[str, dict[str, Order]] = defaultdict(dict)
 _order_numbers = count(1)
 _allowed_transitions = {
@@ -116,6 +125,14 @@ def update_order_status_for(
     updated = order.model_copy(update={"status": status})
     _orders[owner_id][order_id] = updated
     return updated
+
+
+def identity_proof_for(user: GraphUser) -> IdentityProof:
+    fingerprint = hashlib.sha256(user.id.encode("utf-8")).hexdigest()[:8].upper()
+    return IdentityProof(
+        display_name=user.display_name,
+        identity_fingerprint=fingerprint,
+    )
 
 
 def _required_env(name: str) -> str:
@@ -187,6 +204,14 @@ def create_server() -> FastMCP:
             return GraphUser.model_validate(response.json())
 
     @mcp.tool()
+    async def who_am_i(
+        access_token: AccessToken = CurrentAccessToken(),
+    ) -> IdentityProof:
+        """Show the safe Graph identity proof resolved through OBO."""
+        user = await current_user(access_token)
+        return identity_proof_for(user)
+
+    @mcp.tool()
     async def list_orders(
         access_token: AccessToken = CurrentAccessToken(),
     ) -> list[Order]:
@@ -232,4 +257,3 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", "8000")),
         show_banner=False,
     )
-

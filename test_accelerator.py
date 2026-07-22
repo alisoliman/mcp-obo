@@ -12,12 +12,21 @@ from pydantic import ValidationError
 from starlette.testclient import TestClient
 
 import src.server as server
-from src.chat import ChatRequest, Settings, _workload_assertion, create_app
+from src.chat import (
+    ChatRequest,
+    Settings,
+    _safe_event_value,
+    _sse_text_event,
+    _workload_assertion,
+    create_app,
+)
 from src.server import (
+    GraphUser,
     OrderItem,
     OrderStatus,
     create_order_for,
     get_order_for,
+    identity_proof_for,
     list_orders_for,
     update_order_status_for,
 )
@@ -103,6 +112,18 @@ class OrderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least one item"):
             create_order_for("user-a", "Ada", [])
 
+    def test_identity_proof_is_stable_without_exposing_graph_id(self) -> None:
+        user = GraphUser(
+            id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            displayName="Ada",
+        )
+        proof = identity_proof_for(user)
+        self.assertEqual(proof.display_name, "Ada")
+        self.assertEqual(proof, identity_proof_for(user))
+        self.assertEqual(len(proof.identity_fingerprint), 8)
+        self.assertNotIn(user.id, proof.model_dump_json())
+        self.assertEqual(proof.evidence, "Microsoft Graph /me via OBO")
+
 
 class ServerContractTests(unittest.TestCase):
     def test_server_requires_user_scope_and_exposes_only_order_tools(self) -> None:
@@ -122,8 +143,11 @@ class ServerContractTests(unittest.TestCase):
                 "get_order",
                 "create_order",
                 "update_order_status",
+                "who_am_i",
             },
         )
+        long_text = "x" * 5_000
+        self.assertIn(long_text, _sse_text_event("response.delta", long_text))
         self.assertEqual(mcp.auth.token_verifier.required_scopes, ["Mcp.Tools.ReadWrite"])
         for tool in tools:
             self.assertNotIn("access_token", tool.parameters.get("properties", {}))
@@ -188,11 +212,66 @@ class FakeAgent:
     def create_session(self, **_: object) -> object:
         return object()
 
-    async def run(self, message: str, **_: object) -> SimpleNamespace:
+    def run(
+        self,
+        message: str,
+        *,
+        stream: bool = False,
+        middleware: list[object] | None = None,
+        **_: object,
+    ) -> FakeResponseStream | SimpleNamespace:
         FakeAgent.authorization = str(
             self.tools[0]._httpx_client.headers["Authorization"]
         )
         FakeAgent.message = message
+        if stream:
+            return FakeResponseStream(middleware or [])
+        return SimpleNamespace(text="You have one pending order.")
+
+
+class FakeResponseStream:
+    def __init__(self, middleware: list[object]) -> None:
+        self.middleware = middleware
+        self.invoked = False
+        self._updates = iter(
+            [
+                SimpleNamespace(
+                    contents=[
+                        SimpleNamespace(
+                            type="text",
+                            text="You have one pending order.",
+                        )
+                    ]
+                ),
+            ]
+        )
+
+    def __aiter__(self) -> FakeResponseStream:
+        return self
+
+    async def __anext__(self) -> SimpleNamespace:
+        if not self.invoked:
+            self.invoked = True
+            context = SimpleNamespace(
+                function=SimpleNamespace(name="who_am_i"),
+                arguments={},
+                result=None,
+            )
+
+            async def call_next() -> None:
+                context.result = {
+                    "display_name": "Ada",
+                    "identity_fingerprint": "ABC12345",
+                    "evidence": "Microsoft Graph /me via OBO",
+                }
+
+            await self.middleware[0].process(context, call_next)
+        try:
+            return next(self._updates)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def get_final_response(self) -> SimpleNamespace:
         return SimpleNamespace(text="You have one pending order.")
 
 
@@ -231,6 +310,20 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(ChatRequest(message=" list orders ").message, " list orders ")
         with self.assertRaises(ValidationError):
             ChatRequest(message="")
+        self.assertEqual(
+            _safe_event_value(
+                {
+                    "access_token": "secret",
+                    "nested": {"Authorization": "Bearer secret"},
+                    "message": "safe",
+                }
+            ),
+            {
+                "access_token": "[redacted]",
+                "nested": {"Authorization": "[redacted]"},
+                "message": "safe",
+            },
+        )
 
     def test_live_client_flow_forwards_user_token_to_agent_mcp_tool(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -274,17 +367,25 @@ class ChatTests(unittest.TestCase):
                         "get_order",
                         "list_orders",
                         "update_order_status",
+                        "who_am_i",
                     ],
                 )
 
                 response = client.post(
-                    "/api/chat",
+                    "/api/chat/stream",
                     headers={"X-CSRF-Token": session_payload["csrfToken"]},
                     json={"message": "What orders do I have?"},
                 )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["response"], "You have one pending order.")
+        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+        self.assertIn("event: response.started", response.text)
+        self.assertIn("event: tool.started", response.text)
+        self.assertIn('"name":"who_am_i"', response.text)
+        self.assertIn("event: tool.completed", response.text)
+        self.assertIn("ABC12345", response.text)
+        self.assertIn("event: response.delta", response.text)
+        self.assertIn("event: response.completed", response.text)
         self.assertEqual(FakeAgent.authorization, "Bearer mcp-user-token")
         self.assertEqual(FakeAgent.message, "What orders do I have?")
 
@@ -299,7 +400,7 @@ class ChatTests(unittest.TestCase):
                 base_url="https://orders.example.test",
             ) as client:
                 session = client.get("/api/session")
-                response = client.post("/api/chat", json={"message": "hello"})
+                response = client.post("/api/chat/stream", json={"message": "hello"})
                 asset = client.get("/assets/app.js")
         self.assertEqual(session.status_code, 200)
         self.assertEqual(
@@ -314,6 +415,7 @@ class ChatTests(unittest.TestCase):
                         "get_order",
                         "list_orders",
                         "update_order_status",
+                        "who_am_i",
                     ],
                 },
             },
@@ -413,6 +515,8 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("MessageScrollerProvider", app)
         self.assertIn("BubbleContent", app)
         self.assertIn('fetch("/api/session"', app)
+        self.assertIn('fetch("/api/chat/stream"', app)
+        self.assertIn("<ToolHeader", app)
         self.assertIn("historyStorageKey(session.historyKey)", app)
         self.assertIn('role="log"', app)
 
