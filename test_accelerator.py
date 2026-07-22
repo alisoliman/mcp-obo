@@ -17,6 +17,7 @@ from src.chat import (
     Settings,
     _safe_event_value,
     _sse_text_event,
+    _tool_result_value,
     _workload_assertion,
     create_app,
 )
@@ -148,6 +149,14 @@ class ServerContractTests(unittest.TestCase):
         )
         long_text = "x" * 5_000
         self.assertIn(long_text, _sse_text_event("response.delta", long_text))
+        duplicate_result = [
+            SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
+            SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
+        ]
+        self.assertEqual(
+            _tool_result_value(duplicate_result),
+            {"display_name": "Ada"},
+        )
         self.assertEqual(mcp.auth.token_verifier.required_scopes, ["Mcp.Tools.ReadWrite"])
         for tool in tools:
             self.assertNotIn("access_token", tool.parameters.get("properties", {}))

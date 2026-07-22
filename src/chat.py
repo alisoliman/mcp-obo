@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -159,6 +158,24 @@ def _sse_text_event(event: str, text: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
+def _tool_result_value(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    text_values = [
+        item.text
+        for item in value
+        if getattr(item, "type", None) == "text" and getattr(item, "text", None)
+    ]
+    if not text_values:
+        return value
+    for text in text_values:
+        try:
+            return json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return text_values[0] if len(text_values) == 1 else text_values
+
+
 class ToolEventMiddleware(FunctionMiddleware):
     def __init__(self, events: asyncio.Queue) -> None:
         self.events = events
@@ -177,7 +194,9 @@ class ToolEventMiddleware(FunctionMiddleware):
         )
         try:
             await call_next()
-        except BaseException:
+        except asyncio.CancelledError:
+            raise
+        except Exception:
             await self.events.put(
                 (
                     "tool.completed",
@@ -198,7 +217,7 @@ class ToolEventMiddleware(FunctionMiddleware):
                     "name": context.function.name,
                     "status": "completed",
                     "input": context.arguments,
-                    "output": context.result,
+                    "output": _tool_result_value(context.result),
                 },
             )
         )
@@ -400,8 +419,7 @@ def create_app(
             return JSONResponse({"error": "A message of 1-4000 characters is required"}, status_code=400)
 
         async def event_stream():
-            update_task: asyncio.Task | None = None
-            tool_task: asyncio.Task | None = None
+            stream_task: asyncio.Task | None = None
             await session.lock.acquire()
             try:
                 token = await delegated_token(session)
@@ -466,62 +484,62 @@ def create_app(
                             stream=True,
                             middleware=[tool_middleware],
                         )
-                        updates = response_stream.__aiter__()
-                        update_task = asyncio.create_task(anext(updates))
-                        tool_task = asyncio.create_task(tool_events.get())
-                        stream_open = True
 
-                        while stream_open:
-                            done, _ = await asyncio.wait(
-                                {update_task, tool_task},
-                                return_when=asyncio.FIRST_COMPLETED,
-                            )
-
-                            if tool_task in done:
-                                event_name, event_payload = tool_task.result()
-                                yield _sse_event(event_name, event_payload)
-                                tool_task = asyncio.create_task(tool_events.get())
-
-                            if update_task in done:
-                                try:
-                                    update = update_task.result()
-                                except StopAsyncIteration:
-                                    stream_open = False
-                                    update_task = None
-                                else:
+                        async def consume_agent_stream() -> None:
+                            try:
+                                async for update in response_stream:
                                     for content in update.contents:
                                         content_type = str(content.type)
                                         if content_type == "text" and content.text:
-                                            yield _sse_text_event(
-                                                "response.delta",
-                                                content.text,
+                                            await tool_events.put(
+                                                (
+                                                    "response.delta",
+                                                    {"text": content.text},
+                                                )
                                             )
                                         elif content_type == "error":
-                                            yield _sse_event(
-                                                "response.error",
-                                                {
-                                                    "message": (
-                                                        "The agent request failed."
-                                                    )
-                                                },
+                                            await tool_events.put(
+                                                (
+                                                    "response.error",
+                                                    {
+                                                        "message": (
+                                                            "The agent request failed."
+                                                        )
+                                                    },
+                                                )
                                             )
                                             return
-                                    update_task = asyncio.create_task(anext(updates))
+                                final = await response_stream.get_final_response()
+                                await tool_events.put(
+                                    (
+                                        "response.completed",
+                                        {"text": final.text},
+                                    )
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as exc:
+                                await tool_events.put(("stream.exception", exc))
+                            finally:
+                                await tool_events.put(("stream.done", None))
 
-                        if tool_task is not None:
-                            tool_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await tool_task
-                            tool_task = None
-                        while not tool_events.empty():
-                            event_name, event_payload = tool_events.get_nowait()
-                            yield _sse_event(event_name, event_payload)
-
-                        final = await response_stream.get_final_response()
-                        yield _sse_text_event(
-                            "response.completed",
-                            final.text,
-                        )
+                        stream_task = asyncio.create_task(consume_agent_stream())
+                        while True:
+                            event_name, event_payload = await tool_events.get()
+                            if event_name == "stream.done":
+                                break
+                            if event_name == "stream.exception":
+                                raise event_payload
+                            if event_name in {
+                                "response.delta",
+                                "response.completed",
+                            }:
+                                yield _sse_text_event(
+                                    event_name,
+                                    event_payload["text"],
+                                )
+                            else:
+                                yield _sse_event(event_name, event_payload)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -531,12 +549,10 @@ def create_app(
                     {"message": "The agent request failed."},
                 )
             finally:
-                tasks = [task for task in (update_task, tool_task) if task is not None]
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                if stream_task is not None and not stream_task.done():
+                    stream_task.cancel()
+                if stream_task is not None:
+                    await asyncio.gather(stream_task, return_exceptions=True)
                 session.lock.release()
 
         return StreamingResponse(
