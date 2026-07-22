@@ -65,6 +65,14 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import {
+  Tool,
+  ToolContent,
+  ToolHeader,
+  ToolInput,
+  ToolOutput,
+  type ToolState,
+} from "@/components/ai-elements/tool"
 import { cn } from "@/lib/utils"
 
 const MarkdownResponse = lazy(() => import("@/components/markdown-response"))
@@ -72,11 +80,44 @@ const MarkdownResponse = lazy(() => import("@/components/markdown-response"))
 type Theme = "light" | "dark"
 type ChatRole = "user" | "assistant" | "error"
 
+type ToolTrace = {
+  id: string
+  name: string
+  state: ToolState
+  input?: unknown
+  output?: unknown
+  error?: string
+}
+
 type ChatMessage = {
   id: string
   role: ChatRole
   content: string
+  tools?: ToolTrace[]
 }
+
+type StreamEvent =
+  | { event: "response.started"; data: Record<string, never> }
+  | { event: "response.delta"; data: { text: string } }
+  | { event: "response.completed"; data: { text: string } }
+  | {
+      event: "response.error"
+      data: { message: string; code?: string }
+    }
+  | {
+      event: "tool.started"
+      data: { id: string; name: string; input?: unknown }
+    }
+  | {
+      event: "tool.completed"
+      data: {
+        id: string
+        name: string
+        status: "completed" | "error"
+        input?: unknown
+        output?: unknown
+      }
+    }
 
 type SessionProfile = {
   name: string
@@ -100,7 +141,7 @@ const THEME_KEY = "order-agent-theme"
 const suggestions = [
   "What orders do I have?",
   "Create an order for two DEMO-001 items at 1299 cents each.",
-  "Which order can I move to processing?",
+  "Prove which Graph identity the MCP server resolved for me.",
 ]
 
 const identitySteps = [
@@ -175,9 +216,117 @@ function clearOtherHistories(activeKey?: string) {
 function storedMessages(historyKey: string): ChatMessage[] {
   try {
     const value = sessionStorage.getItem(historyStorageKey(historyKey))
-    return value ? (JSON.parse(value) as ChatMessage[]) : []
+    const parsed = value ? (JSON.parse(value) as unknown) : []
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .filter(
+        (message): message is ChatMessage =>
+          typeof message === "object" &&
+          message !== null &&
+          typeof message.id === "string" &&
+          ["user", "assistant", "error"].includes(String(message.role)) &&
+          typeof message.content === "string"
+      )
+      .flatMap((message) => {
+        const tools = (message.tools ?? []).map((tool) =>
+          tool.state === "running"
+            ? {
+                ...tool,
+                state: "error" as const,
+                error: "Interrupted before completion.",
+              }
+            : tool
+        )
+        if (
+          message.role === "assistant" &&
+          !message.content &&
+          tools.length === 0
+        ) {
+          return []
+        }
+        return [{ ...message, tools }]
+      })
   } catch {
     return []
+  }
+}
+
+function parseStreamEvent(block: string): StreamEvent | null {
+  let event = ""
+  const data: string[] = []
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim()
+    } else if (line.startsWith("data:")) {
+      data.push(line.slice(5).trimStart())
+    }
+  }
+  if (!event || data.length === 0) {
+    return null
+  }
+  return {
+    event,
+    data: JSON.parse(data.join("\n")) as unknown,
+  } as StreamEvent
+}
+
+async function readEventStream(
+  response: Response,
+  onEvent: (event: StreamEvent) => void
+) {
+  if (!response.body) {
+    throw new Error("The streaming response had no body.")
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      buffer += decoder.decode(value, { stream: !done }).replaceAll("\r\n", "\n")
+      let boundary = buffer.indexOf("\n\n")
+      while (boundary >= 0) {
+        const event = parseStreamEvent(buffer.slice(0, boundary))
+        buffer = buffer.slice(boundary + 2)
+        if (event) {
+          onEvent(event)
+        }
+        boundary = buffer.indexOf("\n\n")
+      }
+      if (done) {
+        break
+      }
+    }
+
+    const trailing = parseStreamEvent(buffer.trim())
+    if (trailing) {
+      onEvent(trailing)
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
+}
+
+function readableToolName(name: string) {
+  return name
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ")
+}
+
+function parsedToolValue(value: unknown) {
+  if (typeof value !== "string") {
+    return value
+  }
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    return value
   }
 }
 
@@ -317,6 +466,11 @@ function ContextRail({ session }: { session: SessionInfo }) {
 function TranscriptMessage({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user"
   const isError = message.role === "error"
+  const tools = message.tools ?? []
+
+  if (!isUser && !isError && !message.content && tools.length === 0) {
+    return <PendingMessage />
+  }
 
   return (
     <Message align={isUser ? "end" : "start"}>
@@ -340,27 +494,41 @@ function TranscriptMessage({ message }: { message: ChatMessage }) {
         <MessageHeader>
           {isUser ? "You" : isError ? "System" : "Order Agent"}
         </MessageHeader>
-        <Bubble
-          align={isUser ? "end" : "start"}
-          variant={isUser ? "tinted" : isError ? "destructive" : "ghost"}
-        >
-          <BubbleContent
-            className={cn(
-              !isUser && !isError && "text-[0.9375rem] leading-7",
-              isUser && "max-w-[42rem]"
-            )}
+        {tools.map((tool) => (
+          <Tool
+            key={tool.id}
+            defaultOpen={tool.state !== "completed" || tool.name === "who_am_i"}
           >
-            {isUser ? (
-              message.content
-            ) : isError ? (
-              <span role="alert">{message.content}</span>
-            ) : (
-              <Suspense fallback={<span>{message.content}</span>}>
-                <MarkdownResponse>{message.content}</MarkdownResponse>
-              </Suspense>
-            )}
-          </BubbleContent>
-        </Bubble>
+            <ToolHeader name={readableToolName(tool.name)} state={tool.state} />
+            <ToolContent>
+              <ToolInput input={tool.input} />
+              <ToolOutput output={tool.output} errorText={tool.error} />
+            </ToolContent>
+          </Tool>
+        ))}
+        {message.content && (
+          <Bubble
+            align={isUser ? "end" : "start"}
+            variant={isUser ? "tinted" : isError ? "destructive" : "ghost"}
+          >
+            <BubbleContent
+              className={cn(
+                !isUser && !isError && "text-[0.9375rem] leading-7",
+                isUser && "max-w-[42rem]"
+              )}
+            >
+              {isUser ? (
+                message.content
+              ) : isError ? (
+                <span role="alert">{message.content}</span>
+              ) : (
+                <Suspense fallback={<span>{message.content}</span>}>
+                  <MarkdownResponse>{message.content}</MarkdownResponse>
+                </Suspense>
+              )}
+            </BubbleContent>
+          </Bubble>
+        )}
       </MessageContent>
     </Message>
   )
@@ -713,6 +881,7 @@ function ChatWorkspace({
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState("")
+  const streamAbort = useRef<AbortController | null>(null)
 
   useEffect(() => {
     sessionStorage.setItem(
@@ -720,6 +889,13 @@ function ChatWorkspace({
       JSON.stringify(messages)
     )
   }, [messages, session.historyKey])
+
+  useEffect(
+    () => () => {
+      streamAbort.current?.abort()
+    },
+    []
+  )
 
   const sendMessage = useCallback(
     async (rawMessage: string) => {
@@ -732,13 +908,25 @@ function ChatWorkspace({
       setError(null)
       setPending(true)
       setAnnouncement("Order Agent is working")
+      const assistantId = crypto.randomUUID()
       setMessages((current) => [
         ...current,
         { id: crypto.randomUUID(), role: "user", content: message },
+        { id: assistantId, role: "assistant", content: "", tools: [] },
       ])
 
+      const controller = new AbortController()
+      streamAbort.current = controller
+      const updateAssistant = (
+        update: (message: ChatMessage) => ChatMessage
+      ) => {
+        setMessages((current) =>
+          current.map((item) => (item.id === assistantId ? update(item) : item))
+        )
+      }
+
       try {
-        const response = await fetch("/api/chat", {
+        const response = await fetch("/api/chat/stream", {
           method: "POST",
           credentials: "same-origin",
           headers: {
@@ -746,40 +934,127 @@ function ChatWorkspace({
             "X-CSRF-Token": session.csrfToken,
           },
           body: JSON.stringify({ message }),
+          signal: controller.signal,
         })
-        const payload = (await response.json()) as {
-          response?: string
-          error?: string
-        }
         if (response.status === 401) {
           window.location.assign("/login")
           return
         }
-        if (!response.ok || !payload.response) {
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as {
+            error?: string
+          }
           throw new Error(payload.error || "The agent request failed.")
         }
-        const responseText = payload.response
-        setMessages((current) => [
-          ...current,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: responseText,
-          },
-        ])
+
+        await readEventStream(response, (streamEvent) => {
+          if (streamEvent.event === "response.delta") {
+            updateAssistant((current) => ({
+              ...current,
+              content: current.content + streamEvent.data.text,
+            }))
+          } else if (streamEvent.event === "response.completed") {
+            updateAssistant((current) => ({
+              ...current,
+              content: current.content || streamEvent.data.text,
+            }))
+          } else if (streamEvent.event === "tool.started") {
+            updateAssistant((current) => ({
+              ...current,
+              tools: [
+                ...(current.tools ?? []).filter(
+                  (tool) => tool.id !== streamEvent.data.id
+                ),
+                {
+                  id: streamEvent.data.id,
+                  name: streamEvent.data.name,
+                  state: "running",
+                  input: streamEvent.data.input,
+                },
+              ],
+            }))
+            setAnnouncement(
+              `Running ${readableToolName(streamEvent.data.name)}`
+            )
+          } else if (streamEvent.event === "tool.completed") {
+            updateAssistant((current) => ({
+              ...current,
+              tools: (() => {
+                const tools = current.tools ?? []
+                const existing = tools.find(
+                  (tool) => tool.id === streamEvent.data.id
+                )
+                const completed: ToolTrace = {
+                  id: streamEvent.data.id,
+                  name: streamEvent.data.name || existing?.name || "tool",
+                  state:
+                    streamEvent.data.status === "error"
+                      ? "error"
+                      : "completed",
+                  input: streamEvent.data.input ?? existing?.input,
+                  output:
+                    streamEvent.data.status === "error"
+                      ? undefined
+                      : parsedToolValue(streamEvent.data.output),
+                  error:
+                    streamEvent.data.status === "error"
+                      ? String(streamEvent.data.output || "Tool call failed.")
+                      : undefined,
+                }
+                return existing
+                  ? tools.map((tool) =>
+                      tool.id === streamEvent.data.id ? completed : tool
+                    )
+                  : [...tools, completed]
+              })(),
+            }))
+            setAnnouncement(
+              `${readableToolName(streamEvent.data.name)} ${
+                streamEvent.data.status === "error" ? "failed" : "completed"
+              }`
+            )
+          } else if (
+            streamEvent.event === "response.error" &&
+            streamEvent.data.code === "auth_required"
+          ) {
+            window.location.assign("/login")
+            throw new DOMException("Authentication required", "AbortError")
+          } else if (streamEvent.event === "response.error") {
+            throw new Error(streamEvent.data.message)
+          }
+        })
         setAnnouncement("Order Agent response received")
       } catch (requestError) {
+        if (
+          requestError instanceof DOMException &&
+          requestError.name === "AbortError"
+        ) {
+          return
+        }
         const detail =
           requestError instanceof Error
             ? requestError.message
             : "The agent request failed."
         setError(detail)
-        setMessages((current) => [
-          ...current,
-          { id: crypto.randomUUID(), role: "error", content: detail },
-        ])
+        setMessages((current) =>
+          current.flatMap((item) => {
+            if (item.id !== assistantId) {
+              return [item]
+            }
+            if (item.content || (item.tools?.length ?? 0) > 0) {
+              return [
+                item,
+                { id: crypto.randomUUID(), role: "error", content: detail },
+              ]
+            }
+            return [{ ...item, role: "error", content: detail }]
+          })
+        )
         setAnnouncement("Order Agent request failed")
       } finally {
+        if (streamAbort.current === controller) {
+          streamAbort.current = null
+        }
         setPending(false)
       }
     },
@@ -788,6 +1063,7 @@ function ChatWorkspace({
 
   const logout = useCallback(async () => {
     try {
+      streamAbort.current?.abort()
       const response = await fetch("/logout", {
         method: "POST",
         credentials: "same-origin",
@@ -872,11 +1148,6 @@ function ChatWorkspace({
                       <TranscriptMessage message={message} />
                     </MessageScrollerItem>
                   ))
-                )}
-                {pending && (
-                  <MessageScrollerItem messageId="pending">
-                    <PendingMessage />
-                  </MessageScrollerItem>
                 )}
               </MessageScrollerContent>
             </MessageScrollerViewport>

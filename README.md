@@ -5,6 +5,8 @@ A two-workload Python sample deployed with one `azd up`:
 - A Microsoft Agent Framework chat application authenticates the user.
 - A React and TypeScript interface built from shadcn conversation primitives
   presents the live identity path and chat.
+- Agent text streams as it is generated, while collapsible shadcn tool cards
+  show sanitized MCP inputs, completion state, and results.
 - A separate FastMCP server provides user-scoped order tools.
 - The agent uses a Microsoft Foundry `gpt-5.6-terra` deployment.
 - Every MCP call carries the signed-in user's delegated token.
@@ -61,6 +63,7 @@ There is no custom deployment program.
 
 | Tool | Behavior |
 |---|---|
+| `who_am_i` | Shows the safe Graph `/me` identity proof resolved through OBO |
 | `list_orders` | Lists orders owned by the signed-in user |
 | `get_order` | Gets one owned order |
 | `create_order` | Creates a validated order |
@@ -113,9 +116,35 @@ Sign in, then try:
 
 ```text
 What orders do I have?
+Prove which Graph identity the MCP server resolved for me.
 Create an order for two DEMO-001 items at 1299 cents each.
 Move that order to processing.
 ```
+
+The identity proof contains the Graph display name, an eight-character hash of
+the Graph object ID, and the evidence label `Microsoft Graph /me via OBO`. It
+never returns the raw Graph ID, token, or claims.
+
+## Demonstrate user isolation
+
+Keep the single MCP pod running for the whole demonstration because the sample
+store is in memory.
+
+1. Sign in as user A and create an order.
+2. Ask the agent to prove the MCP identity. Record user A's display name and
+   fingerprint from the `Who Am I` tool card.
+3. Open an InPrivate window and sign in as user B.
+4. List orders. User A's order is absent.
+5. Request user A's known order ID directly. The result is `Order not found`,
+   which does not disclose whether another user owns that ID.
+6. Ask for the identity proof again. User B has a different Graph display name
+   and fingerprint.
+7. Create an order as user B, then return to user A and list orders again. Each
+   user sees only their own data.
+
+The server partitions `_orders` by the object ID returned from Graph `/me`.
+Application-only calls remain rejected because the MCP requires the delegated
+`Mcp.Tools.ReadWrite` scope and Graph `/me` requires user context.
 
 Important outputs:
 

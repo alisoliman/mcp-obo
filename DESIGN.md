@@ -201,7 +201,9 @@ desktop breakpoint.
 
 Use shadcn `MessageScroller`, `Message`, and `Bubble` primitives. User messages
 align right with a quiet primary tint. Agent messages align left on the reading
-surface. The pending state is a labeled skeleton row. New content is announced
+surface. Streamed MCP calls use collapsible shadcn tool cards with explicit
+Running, Completed, and Error states; the safe identity-proof card opens by
+default. The pending state is a labeled skeleton row. New content is announced
 through a polite live region and the scroller follows only when the user is at
 the bottom.
 
