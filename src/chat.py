@@ -295,7 +295,7 @@ def create_app(
         return bool(supplied) and secrets.compare_digest(supplied, session.csrf_token)
 
     async def index(_: Request) -> FileResponse:
-        return FileResponse(index_path)
+        return FileResponse(index_path, headers={"Cache-Control": "no-cache"})
 
     async def favicon(_: Request) -> FileResponse:
         return FileResponse(static_root / "favicon.svg", media_type="image/svg+xml")
@@ -310,10 +310,16 @@ def create_app(
         }
         active = current_session(request)
         if active is None:
-            return JSONResponse({"authenticated": False, **common})
+            return JSONResponse(
+                {"authenticated": False, **common},
+                headers={"Cache-Control": "no-store"},
+            )
         _, session = active
         if session.profile is None:
-            return JSONResponse({"authenticated": False, **common})
+            return JSONResponse(
+                {"authenticated": False, **common},
+                headers={"Cache-Control": "no-store"},
+            )
         username = str(
             session.profile.get("preferred_username")
             or session.profile.get("email")
@@ -330,7 +336,8 @@ def create_app(
                 "csrfToken": session.csrf_token,
                 "historyKey": session.history_key,
                 **common,
-            }
+            },
+            headers={"Cache-Control": "no-store"},
         )
 
     async def health(_: Request) -> JSONResponse:

@@ -3,6 +3,7 @@ import {
   CheckCircleIcon,
   ChevronDownIcon,
   ClockIcon,
+  ShieldCheckIcon,
   WrenchIcon,
   XCircleIcon,
 } from "lucide-react"
@@ -64,11 +65,20 @@ export function Tool({
 export function ToolHeader({
   name,
   state,
+  verified = false,
 }: {
   name: string
   state: ToolState
+  verified?: boolean
 }) {
-  const current = status[state]
+  const current =
+    verified && state === "completed"
+      ? {
+          label: "Identity verified",
+          icon: <ShieldCheckIcon className="size-3.5 text-primary" />,
+          className: undefined,
+        }
+      : status[state]
   return (
     <CollapsibleTrigger className="flex w-full items-center justify-between gap-4 p-3 text-left">
       <span className="flex min-w-0 items-center gap-2">
