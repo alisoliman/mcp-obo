@@ -15,11 +15,6 @@
   --color-sidebar-primary: var(--sidebar-primary);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar: var(--sidebar);
-  --color-chart-5: var(--chart-5);
-  --color-chart-4: var(--chart-4);
-  --color-chart-3: var(--chart-3);
-  --color-chart-2: var(--chart-2);
-  --color-chart-1: var(--chart-1);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -66,11 +61,6 @@
   --border: oklch(0.88 0.01 250);
   --input: oklch(0.84 0.012 250);
   --ring: oklch(0.54 0.14 245);
-  --chart-1: oklch(0.4 0.106 150);
-  --chart-2: oklch(0.54 0.14 245);
-  --chart-3: oklch(0.62 0.12 70);
-  --chart-4: oklch(0.58 0.14 315);
-  --chart-5: oklch(0.5 0.09 200);
   --radius: 0.625rem;
   --sidebar: oklch(0.972 0.004 250);
   --sidebar-foreground: oklch(0.18 0.018 250);
@@ -104,11 +94,6 @@
   --border: oklch(0.29 0.012 250);
   --input: oklch(0.33 0.014 250);
   --ring: oklch(0.7 0.115 245);
-  --chart-1: oklch(0.64 0.12 150);
-  --chart-2: oklch(0.7 0.115 245);
-  --chart-3: oklch(0.72 0.11 70);
-  --chart-4: oklch(0.68 0.13 315);
-  --chart-5: oklch(0.67 0.09 200);
   --sidebar: oklch(0.15 0.006 250);
   --sidebar-foreground: oklch(0.95 0.006 250);
   --sidebar-primary: oklch(0.43 0.11 150);
@@ -141,6 +126,8 @@
     margin: 0;
     overflow-x: hidden;
     font-synthesis: none;
+    font-kerning: normal;
+    font-optical-sizing: auto;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
   }

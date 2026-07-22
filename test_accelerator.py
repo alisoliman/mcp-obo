@@ -361,9 +361,14 @@ class ChatTests(unittest.TestCase):
 
                 page = client.get("/")
                 self.assertIn('<div id="root"></div>', page.text)
+                self.assertEqual(page.headers["cache-control"], "no-cache")
 
                 browser_session = client.get("/api/session")
                 self.assertEqual(browser_session.status_code, 200)
+                self.assertEqual(
+                    browser_session.headers["cache-control"],
+                    "no-store",
+                )
                 session_payload = browser_session.json()
                 self.assertTrue(session_payload["authenticated"])
                 self.assertEqual(session_payload["profile"]["name"], "Ada")
@@ -412,6 +417,7 @@ class ChatTests(unittest.TestCase):
                 response = client.post("/api/chat/stream", json={"message": "hello"})
                 asset = client.get("/assets/app.js")
         self.assertEqual(session.status_code, 200)
+        self.assertEqual(session.headers["cache-control"], "no-store")
         self.assertEqual(
             session.json(),
             {

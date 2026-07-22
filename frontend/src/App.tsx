@@ -18,6 +18,7 @@ import {
   Moon,
   Network,
   ShieldCheck,
+  Square,
   Sun,
   UserRound,
   Wrench,
@@ -138,6 +139,7 @@ type SessionInfo = {
 
 const HISTORY_PREFIX = "order-agent-chat-history"
 const THEME_KEY = "order-agent-theme"
+const STORED_MESSAGE_LIMIT = 100
 const suggestions = [
   "What orders do I have?",
   "Create an order for two DEMO-001 items at 1299 cents each.",
@@ -166,7 +168,7 @@ const identitySteps = [
   {
     icon: Database,
     label: "Microsoft Graph",
-    detail: "OBO resolves /me",
+    detail: "Token exchange + Graph /me",
     tone: "primary",
   },
 ] as const
@@ -187,6 +189,9 @@ function useTheme() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark")
     document.documentElement.style.colorScheme = theme
+    document
+      .querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+      ?.setAttribute("content", theme === "dark" ? "#09090b" : "#ffffff")
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
@@ -379,14 +384,14 @@ function ThemeToggle({
   )
 }
 
-function ConnectionStatus() {
+function ConnectionStatus({ label = "Session active" }: { label?: string }) {
   return (
     <span className="inline-flex items-center gap-2 text-xs font-medium text-muted-foreground">
       <span className="relative flex size-2" aria-hidden="true">
         <span className="absolute inline-flex size-full rounded-full bg-primary/30" />
         <span className="relative inline-flex size-2 rounded-full bg-primary" />
       </span>
-      Connected
+      {label}
     </span>
   )
 }
@@ -498,8 +503,17 @@ function TranscriptMessage({ message }: { message: ChatMessage }) {
           <Tool
             key={tool.id}
             defaultOpen={tool.state !== "completed" || tool.name === "who_am_i"}
+            className={cn(
+              tool.name === "who_am_i" &&
+                tool.state === "completed" &&
+                "border-primary/35 bg-primary/[0.03] transition-colors duration-200"
+            )}
           >
-            <ToolHeader name={readableToolName(tool.name)} state={tool.state} />
+            <ToolHeader
+              name={readableToolName(tool.name)}
+              state={tool.state}
+              verified={tool.name === "who_am_i"}
+            />
             <ToolContent>
               <ToolInput input={tool.input} />
               <ToolOutput output={tool.output} errorText={tool.error} />
@@ -553,6 +567,9 @@ function PendingMessage() {
         >
           <Skeleton className="h-3 w-52" />
           <Skeleton className="h-3 w-36" />
+          <p className="pt-1 text-sm text-muted-foreground">
+            Starting the agent and waiting for any required MCP tools.
+          </p>
         </div>
       </MessageContent>
     </Message>
@@ -573,11 +590,11 @@ function EmptyConversation({
           <Network className="size-5" />
         </div>
         <h1 className="text-xl font-semibold tracking-tight text-balance">
-          Ask the live identity path
+          Ask about orders. Inspect the identity path.
         </h1>
         <p className="mt-2 max-w-[60ch] text-sm leading-6 text-muted-foreground text-pretty">
-          Each order request runs through Foundry, the Order MCP server, and a
-          delegated Graph OBO exchange for your signed-in identity.
+          Responses stream from Foundry. When the agent needs order data, each
+          tool card shows the MCP call and the Graph identity resolved through OBO.
         </p>
         <div
           className="mt-7 grid gap-2 sm:flex sm:flex-wrap"
@@ -589,7 +606,7 @@ function EmptyConversation({
               type="button"
               variant="outline"
               size="sm"
-              className="h-auto w-full max-w-full justify-start py-2 text-left whitespace-normal sm:w-auto"
+              className="min-h-11 w-full max-w-full justify-start py-2 text-left whitespace-normal sm:w-auto"
               disabled={disabled}
               onClick={() => onSuggestion(suggestion)}
             >
@@ -608,12 +625,14 @@ function PromptComposer({
   error,
   onChange,
   onSubmit,
+  onCancel,
 }: {
   value: string
   pending: boolean
   error: string | null
   onChange: (value: string) => void
   onSubmit: () => void
+  onCancel: () => void
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -639,8 +658,11 @@ function PromptComposer({
             onSubmit()
           }}
         >
-          <label className="sr-only" htmlFor="order-agent-prompt">
-            Message Order Agent
+          <label
+            className="mb-2 block text-sm font-medium"
+            htmlFor="order-agent-prompt"
+          >
+            Ask the Order Agent
           </label>
           <InputGroup className="min-h-24 rounded-xl bg-background shadow-[0_-1px_18px_oklch(0.18_0.018_250/0.05)] has-disabled:opacity-100">
             <InputGroupTextarea
@@ -651,7 +673,7 @@ function PromptComposer({
               rows={2}
               disabled={pending}
               placeholder="Ask about your orders..."
-              className="min-h-14 field-sizing-content px-3 pt-3 text-[0.9375rem]"
+              className="min-h-14 field-sizing-content px-3 pt-3 text-base"
               onChange={(event) => onChange(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
@@ -669,19 +691,22 @@ function PromptComposer({
                 Runs as your identity
               </InputGroupText>
               <InputGroupButton
-                type="submit"
-                variant="default"
+                type={pending ? "button" : "submit"}
+                variant={pending ? "outline" : "default"}
                 size="icon-sm"
-                aria-label={pending ? "Waiting for response" : "Send message"}
-                disabled={pending || !value.trim()}
+                aria-label={pending ? "Stop response" : "Send message"}
+                disabled={!pending && !value.trim()}
+                onClick={pending ? onCancel : undefined}
               >
-                <ArrowUp />
+                {pending ? <Square /> : <ArrowUp />}
               </InputGroupButton>
             </InputGroupAddon>
           </InputGroup>
         </form>
         <p className="mt-2 text-center text-xs text-muted-foreground">
-          Enter to send · Shift + Enter for a new line
+          {pending
+            ? "Response is streaming. Stop it at any time."
+            : "Enter to send · Shift + Enter for a new line"}
         </p>
       </div>
     </div>
@@ -702,7 +727,7 @@ function UserMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="h-9 gap-2 px-2" aria-label="User menu">
+        <Button variant="ghost" className="h-11 gap-2 px-2" aria-label="User menu">
           <Avatar className="size-7">
             <AvatarFallback className="bg-primary text-xs text-primary-foreground">
               {initials(profile.name)}
@@ -757,18 +782,18 @@ function SignedOut({
         <ThemeToggle theme={theme} onToggle={onTheme} />
       </header>
 
-      <main className="mx-auto grid max-w-6xl gap-12 px-5 py-14 md:px-8 lg:grid-cols-[minmax(0,1fr)_25rem] lg:items-center lg:py-24">
+      <main className="mx-auto grid max-w-6xl gap-12 px-5 py-14 md:px-8 min-[56rem]:grid-cols-[minmax(0,1fr)_minmax(20rem,25rem)] min-[56rem]:items-center min-[56rem]:gap-10 lg:py-24">
         <section>
           <Badge variant="outline" className="mb-5">
-            Live architecture sample
+            Live delegated identity demo
           </Badge>
           <h1 className="max-w-2xl text-3xl font-semibold tracking-[-0.025em] text-balance md:text-4xl">
             Follow one user identity through an agent and its tools.
           </h1>
           <p className="mt-5 max-w-[65ch] text-base leading-7 text-muted-foreground text-pretty">
-            Sign in to use a Microsoft Agent Framework client backed by{" "}
-            {session.model}. Every order tool call forwards your delegated token
-            to a separate FastMCP server, which completes OBO to Microsoft Graph.
+            Sign in and ask about sample orders using {session.model}. The chat
+            forwards your delegated token to a separate MCP server, which exchanges
+            it for a Graph token and resolves your identity before each tool runs.
           </p>
           <Button asChild size="lg" className="mt-8">
             <a href="/login">
@@ -778,7 +803,7 @@ function SignedOut({
           </Button>
           <p className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
             <KeyRound className="size-3.5" />
-            OAuth tokens stay server-side and are never sent to this browser.
+            Access and refresh tokens remain in the server-side session.
           </p>
         </section>
 
@@ -789,13 +814,13 @@ function SignedOut({
           <div className="flex items-center justify-between gap-4">
             <div>
               <h2 id="identity-path-heading" className="text-sm font-semibold">
-                Identity path
+                Delegated identity path
               </h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                One delegated request, four boundaries
+                Four boundaries, one signed-in identity
               </p>
             </div>
-            <ConnectionStatus />
+            <ConnectionStatus label="Demo ready" />
           </div>
           <Separator className="my-5" />
           <ol className="space-y-4">
@@ -884,10 +909,15 @@ function ChatWorkspace({
   const streamAbort = useRef<AbortController | null>(null)
 
   useEffect(() => {
-    sessionStorage.setItem(
-      historyStorageKey(session.historyKey),
-      JSON.stringify(messages)
-    )
+    const key = historyStorageKey(session.historyKey)
+    try {
+      sessionStorage.setItem(
+        key,
+        JSON.stringify(messages.slice(-STORED_MESSAGE_LIMIT))
+      )
+    } catch {
+      sessionStorage.removeItem(key)
+    }
   }, [messages, session.historyKey])
 
   useEffect(
@@ -896,6 +926,10 @@ function ChatWorkspace({
     },
     []
   )
+
+  const cancelStream = useCallback(() => {
+    streamAbort.current?.abort("user_stop")
+  }, [])
 
   const sendMessage = useCallback(
     async (rawMessage: string) => {
@@ -917,6 +951,7 @@ function ChatWorkspace({
 
       const controller = new AbortController()
       streamAbort.current = controller
+      let streamCompleted = false
       const updateAssistant = (
         update: (message: ChatMessage) => ChatMessage
       ) => {
@@ -946,6 +981,13 @@ function ChatWorkspace({
           }
           throw new Error(payload.error || "The agent request failed.")
         }
+        if (
+          !response.headers.get("content-type")?.includes("text/event-stream")
+        ) {
+          throw new Error(
+            "The server returned an unreadable response. Try the request again."
+          )
+        }
 
         await readEventStream(response, (streamEvent) => {
           if (streamEvent.event === "response.delta") {
@@ -954,6 +996,7 @@ function ChatWorkspace({
               content: current.content + streamEvent.data.text,
             }))
           } else if (streamEvent.event === "response.completed") {
+            streamCompleted = true
             updateAssistant((current) => ({
               ...current,
               content: current.content || streamEvent.data.text,
@@ -1023,12 +1066,49 @@ function ChatWorkspace({
             throw new Error(streamEvent.data.message)
           }
         })
+        if (!streamCompleted) {
+          throw new Error(
+            "The response ended before the agent finished. Try the request again."
+          )
+        }
         setAnnouncement("Order Agent response received")
       } catch (requestError) {
         if (
           requestError instanceof DOMException &&
           requestError.name === "AbortError"
         ) {
+          if (controller.signal.reason === "user_stop") {
+            setMessages((current) =>
+              current.flatMap((item) => {
+                if (item.id !== assistantId) {
+                  return [item]
+                }
+                const stopped = {
+                  ...item,
+                  tools: item.tools?.map((tool) =>
+                    tool.state === "running"
+                      ? {
+                          ...tool,
+                          state: "error" as const,
+                          error: "Stopped before completion.",
+                        }
+                      : tool
+                  ),
+                }
+                return [
+                  ...(stopped.content || (stopped.tools?.length ?? 0) > 0
+                    ? [stopped]
+                    : []),
+                  {
+                    id: crypto.randomUUID(),
+                    role: "error" as const,
+                    content: "Response stopped. Send another message when ready.",
+                  },
+                ]
+              })
+            )
+            setAnnouncement("Response stopped")
+          }
           return
         }
         const detail =
@@ -1103,7 +1183,7 @@ function ChatWorkspace({
                 <span className="text-border" aria-hidden="true">
                   /
                 </span>
-                <ConnectionStatus />
+                <ConnectionStatus label="Delegated session" />
               </div>
               <p className="hidden truncate text-xs text-muted-foreground lg:block">
                 MCP tools run with {session.profile.name}&apos;s delegated identity
@@ -1161,6 +1241,7 @@ function ChatWorkspace({
           error={error}
           onChange={setDraft}
           onSubmit={() => void sendMessage(draft)}
+          onCancel={cancelStream}
         />
         <div className="sr-only" role="status" aria-live="polite">
           {announcement}
