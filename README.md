@@ -94,13 +94,36 @@ Prove which identity the MCP server resolved for me.
 
 ## Verify it
 
+Before deploying — none of this needs Azure:
+
 ```bash
-uv run python -m unittest test_accelerator -v    # no deployment needed
-uv run python -m unittest test_databricks_e2e -v # databricks mode, live
+uv sync
+uv run python -m unittest test_accelerator -v
+az bicep build --file infra/main.bicep --stdout > /dev/null
+cd frontend && npm ci && npm run build && npm run lint && cd ..
+```
+
+Against a live deployment:
+
+```bash
+azd provision --preview --no-prompt
+uv run python -m unittest test_databricks_e2e -v   # databricks mode only
 ```
 
 `test_accelerator` is named explicitly on purpose — bare `python -m unittest`
-also discovers the end-to-end module, which calls the deployed stack.
+also discovers the end-to-end module, which calls the deployed stack, so the
+fast local loop would quietly become live round trips once you have deployed.
+
+The Python tests cover the order rules, per-user isolation, the mode switch, the
+MCP token and scope requirements, the browser session and CSRF behaviour, the
+ingress routing split, and that the compiled template requests no application
+permission. Everything else is checked by the tool that owns it: Bicep for the
+template, `azd provision --preview` for the plan, and the two image builds for
+the Dockerfiles.
+
+Note that `azd provision --preview` will not list the Databricks workspace — ARM
+what-if has no coverage for that provider, so it omits those resources silently
+rather than reporting them unchanged. Use `az bicep build` to confirm them.
 
 ## Source layout
 
