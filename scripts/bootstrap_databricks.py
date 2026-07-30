@@ -1,0 +1,583 @@
+"""Create the Unity Catalog objects that ARM cannot.
+
+Bicep stops at the workspace. Metastores are an *account*-level Databricks
+concept, and catalogs, tables, warehouses, grants, row filters and column masks
+are all workspace-level REST or SQL. This script covers that gap and is the
+only imperative step in the deployment.
+
+It runs as the deploying user through `AzureCliCredential`, and it is
+idempotent: every step checks for what it is about to create, and the demo
+tables are dropped and rebuilt so a re-run always lands on known seed data.
+
+What it deliberately does *not* do is grant anything to the MCP server's own
+identity. The server reaches this data only while holding a caller's token.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+from azure.identity import AzureCliCredential
+
+from src.obo import DATABRICKS_SCOPE
+
+ACCOUNTS_HOST = "https://accounts.azuredatabricks.net"
+AUDITORS_GROUP = "mcp_obo_auditors"
+TIMEOUT = httpx.Timeout(120.0, connect=15.0)
+
+
+class BootstrapError(RuntimeError):
+    pass
+
+
+def env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def required(name: str) -> str:
+    value = env(name)
+    if not value:
+        raise BootstrapError(f"{name} is required")
+    return value
+
+
+@dataclass(frozen=True)
+class Config:
+    host: str
+    workspace_name: str
+    workspace_id: str
+    workspace_resource_id: str
+    region: str
+    catalog: str
+    schema: str
+    warehouse_name: str
+    account_id: str
+
+    @classmethod
+    def from_env(cls) -> Config:
+        return cls(
+            host=required("DATABRICKS_HOST").rstrip("/"),
+            workspace_name=env("DATABRICKS_WORKSPACE_NAME"),
+            workspace_resource_id=env("DATABRICKS_WORKSPACE_RESOURCE_ID"),
+            # Preferred name. If the metastore has no storage root the bootstrap
+            # falls back to the catalog Databricks created with the workspace,
+            # and reports which one it settled on.
+            catalog=required("DATABRICKS_CATALOG"),
+            schema=required("DATABRICKS_SCHEMA"),
+            warehouse_name=required("DATABRICKS_WAREHOUSE_NAME"),
+            # The last three are needed only when this workspace has no
+            # metastore assigned, which on Azure is rare — one is provisioned
+            # automatically. Requiring them unconditionally would fail every
+            # normal run for the sake of a branch that almost never executes.
+            workspace_id=env("DATABRICKS_WORKSPACE_NUMERIC_ID"),
+            region=env("AZURE_LOCATION", "northeurope"),
+            account_id=env("DATABRICKS_ACCOUNT_ID"),
+        )
+
+
+class Databricks:
+    def __init__(
+        self,
+        token: str,
+        arm_token: str = "",
+        workspace_resource_id: str = "",
+    ) -> None:
+        headers = {"Authorization": f"Bearer {token}"}
+        if arm_token and workspace_resource_id:
+            # An Entra token alone is not enough to reach a workspace: the
+            # identity has to exist in it, and a fresh workspace only knows
+            # whoever created it. These two headers let anyone holding
+            # Owner or Contributor on the workspace resource act as a workspace
+            # admin, and provision themselves on first call. Without them the
+            # bootstrap fails with "Unauthorized access to Org" for a user who
+            # has simply never signed in to Databricks.
+            headers["X-Databricks-Azure-SP-Management-Token"] = arm_token
+            headers["X-Databricks-Azure-Workspace-Resource-Id"] = workspace_resource_id
+        self._client = httpx.Client(timeout=TIMEOUT, headers=headers)
+
+    def call(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        allow: tuple[int, ...] = (),
+    ) -> dict[str, Any] | None:
+        """Return the parsed body, or None when the status was in `allow`.
+
+        `allow` exists so "does this already exist?" reads as `is None` at the
+        call site rather than as a sentinel dict pretending to be a response.
+        """
+        response = self._client.request(method, url, params=params, json=json_body)
+        if response.status_code in allow:
+            return None
+        if response.status_code >= 400:
+            raise BootstrapError(
+                f"{method} {url} -> {response.status_code}: {response.text[:500]}"
+            )
+        return response.json() if response.content else {}
+
+    def close(self) -> None:
+        self._client.close()
+
+
+def log(message: str) -> None:
+    # Progress goes to stderr so `--print-env` leaves stdout clean enough to
+    # pipe straight into `azd env set`.
+    print(f"  {message}", file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------
+# Metastore
+# --------------------------------------------------------------------------
+
+
+def ensure_metastore(api: Databricks, config: Config) -> None:
+    """Confirm a Unity Catalog metastore is assigned, creating one if allowed.
+
+    On Azure the usual answer is "already assigned": a metastore is
+    auto-provisioned with the first workspace in a region, which is why the
+    accelerator needs no Databricks account administrator. The account-API
+    branch below covers tenants where that automatic assignment is switched
+    off. It is deliberately kept, and just as deliberately flagged: it has not
+    been exercised against a live account, because no deployment of this
+    template has needed it.
+    """
+    current = api.call(
+        "GET",
+        f"{config.host}/api/2.1/unity-catalog/metastore_summary",
+        allow=(404, 400),
+    )
+    if current and "metastore_id" in current:
+        log(f"metastore already assigned: {current['metastore_id']}")
+        return
+
+    if not config.account_id:
+        raise BootstrapError(
+            "This workspace has no Unity Catalog metastore, and creating one is an\n"
+            "account-level operation. Set DATABRICKS_ACCOUNT_ID and re-run:\n\n"
+            "  1. Sign in to https://accounts.azuredatabricks.net as an Entra\n"
+            "     Global Administrator (this also makes you a Databricks account\n"
+            "     admin the first time).\n"
+            "  2. Copy the account id from the user menu.\n"
+            "  3. azd env set DATABRICKS_ACCOUNT_ID <account-id>\n"
+        )
+    if not config.workspace_id:
+        raise BootstrapError(
+            "DATABRICKS_WORKSPACE_NUMERIC_ID is required to assign a metastore"
+        )
+
+    base = f"{ACCOUNTS_HOST}/api/2.0/accounts/{config.account_id}"
+    existing = api.call("GET", f"{base}/metastores") or {}
+    # A metastore is one per region per account, so an existing one in this
+    # region must be reused rather than duplicated. Creating a second is not
+    # merely wasteful — it is an account-wide side effect.
+    for metastore in existing.get("metastores", []):
+        if metastore.get("region") == config.region:
+            metastore_id = str(metastore["metastore_id"])
+            log(f"reusing account metastore in {config.region}: {metastore_id}")
+            break
+    else:
+        created = api.call(
+            "POST",
+            f"{base}/metastores",
+            json_body={
+                "metastore_info": {
+                    "name": f"mcp-obo-{config.region}",
+                    "region": config.region,
+                }
+            },
+        ) or {}
+        metastore_id = str(
+            created.get("metastore_info", created).get("metastore_id", "")
+        )
+        log(f"created metastore {metastore_id}")
+
+    api.call(
+        "PUT",
+        f"{base}/workspaces/{config.workspace_id}/metastore",
+        json_body={"metastore_id": metastore_id},
+    )
+    log(f"assigned metastore to workspace {config.workspace_id}")
+
+
+# --------------------------------------------------------------------------
+# Catalog
+# --------------------------------------------------------------------------
+
+
+def ensure_catalog(api: Databricks, config: Config) -> str:
+    """Return a catalog to build the demo in, preferring the requested name.
+
+    Azure auto-provisions a metastore with each new workspace, but that
+    metastore has no storage root of its own -- Databricks holds the storage
+    behind "Default Storage" instead. A plain CREATE CATALOG therefore fails
+    with INVALID_STATE unless you name a location. Rather than demand that every
+    customer bring an ADLS container just to run a demo, this falls back to the
+    managed catalog Databricks already created alongside the workspace.
+    """
+    uc = f"{config.host}/api/2.1/unity-catalog"
+
+    if api.call("GET", f"{uc}/catalogs/{config.catalog}", allow=(404,)) is not None:
+        log(f"catalog already exists: {config.catalog}")
+        return config.catalog
+
+    created = api.call(
+        "POST",
+        f"{uc}/catalogs",
+        json_body={
+            "name": config.catalog,
+            "comment": "MCP OBO delegated identity demo",
+        },
+        allow=(400, 403),
+    )
+    if created is not None:
+        log(f"created catalog {config.catalog}")
+        return config.catalog
+
+    managed = [
+        str(catalog["name"])
+        for catalog in (api.call("GET", f"{uc}/catalogs") or {}).get("catalogs", [])
+        if catalog.get("catalog_type") == "MANAGED_CATALOG"
+    ]
+    if managed:
+        # Databricks names the workspace's own catalog after the workspace, so
+        # prefer that over whichever happens to sort first — seeding into an
+        # unrelated team's catalog because of list ordering would be rude.
+        expected = config.workspace_name.replace("-", "_").lower()
+        name = next((c for c in managed if c.lower() == expected), managed[0])
+        log(
+            "no storage root for a new catalog; using the workspace's "
+            f"managed catalog {name}"
+        )
+        return name
+
+    raise BootstrapError(
+        f"Could not create catalog {config.catalog} and found no managed "
+        "catalog to fall back to. Create one in the Databricks UI with Default "
+        "Storage, then set DATABRICKS_CATALOG to its name and re-run."
+    )
+
+
+# --------------------------------------------------------------------------
+# SQL warehouse
+# --------------------------------------------------------------------------
+
+
+def ensure_warehouse(api: Databricks, config: Config) -> str:
+    listed = api.call("GET", f"{config.host}/api/2.0/sql/warehouses")
+    for warehouse in listed.get("warehouses", []):
+        if warehouse.get("name") == config.warehouse_name:
+            warehouse_id = str(warehouse["id"])
+            log(f"warehouse {config.warehouse_name} already exists: {warehouse_id}")
+            return start_warehouse(api, config, warehouse_id)
+
+    payload = {
+        "name": config.warehouse_name,
+        "cluster_size": "2X-Small",
+        "min_num_clusters": 1,
+        "max_num_clusters": 1,
+        # Short auto-stop: this is a demo warehouse, not a service.
+        "auto_stop_mins": 10,
+        "warehouse_type": "PRO",
+        "enable_serverless_compute": True,
+        "spot_instance_policy": "COST_OPTIMIZED",
+    }
+    try:
+        created = api.call(
+            "POST", f"{config.host}/api/2.0/sql/warehouses", json_body=payload
+        )
+    except BootstrapError as error:
+        # Serverless is not available in every region or account. Classic PRO
+        # warehouses enforce Unity Catalog identically; they just start slower.
+        log(f"serverless unavailable, falling back to classic PRO ({error})")
+        payload["enable_serverless_compute"] = False
+        created = api.call(
+            "POST", f"{config.host}/api/2.0/sql/warehouses", json_body=payload
+        )
+
+    warehouse_id = str(created["id"])
+    log(f"created warehouse {config.warehouse_name}: {warehouse_id}")
+    return start_warehouse(api, config, warehouse_id)
+
+
+def start_warehouse(api: Databricks, config: Config, warehouse_id: str) -> str:
+    url = f"{config.host}/api/2.0/sql/warehouses/{warehouse_id}"
+    state = api.call("GET", url).get("state", "")
+    if state not in {"RUNNING", "STARTING"}:
+        api.call("POST", f"{url}/start", allow=(400,))
+
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        state = api.call("GET", url).get("state", "")
+        if state == "RUNNING":
+            log(f"warehouse running: {warehouse_id}")
+            return warehouse_id
+        if state in {"DELETED", "STOPPED"}:
+            raise BootstrapError(f"warehouse entered {state} while starting")
+        time.sleep(10)
+    raise BootstrapError("warehouse did not reach RUNNING within 10 minutes")
+
+
+# --------------------------------------------------------------------------
+# SQL
+# --------------------------------------------------------------------------
+
+
+def run_sql(
+    api: Databricks, config: Config, warehouse_id: str, statement: str
+) -> None:
+    body = api.call(
+        "POST",
+        f"{config.host}/api/2.0/sql/statements",
+        json_body={
+            "warehouse_id": warehouse_id,
+            "statement": statement,
+            "wait_timeout": "50s",
+            "on_wait_timeout": "CONTINUE",
+            "format": "JSON_ARRAY",
+            "disposition": "INLINE",
+        },
+    )
+    statement_id = body.get("statement_id")
+    state = body.get("status", {}).get("state")
+
+    deadline = time.time() + 600
+    while state in {"PENDING", "RUNNING"} and time.time() < deadline:
+        time.sleep(3)
+        body = api.call(
+            "GET", f"{config.host}/api/2.0/sql/statements/{statement_id}"
+        )
+        state = body.get("status", {}).get("state")
+
+    if state != "SUCCEEDED":
+        message = body.get("status", {}).get("error", {}).get("message", "")
+        raise BootstrapError(
+            f"statement {state}: {message}\n  ---\n  {statement.strip()[:400]}"
+        )
+
+
+def current_user(api: Databricks, config: Config) -> str:
+    me = api.call("GET", f"{config.host}/api/2.0/preview/scim/v2/Me")
+    user = me.get("userName", "")
+    if not user:
+        raise BootstrapError("Databricks did not resolve a user for this token")
+    return user
+
+
+def demo_owners(user: str) -> list[str]:
+    """Who the seeded orders belong to.
+
+    The bootstrapping user always comes first. `DATABRICKS_DEMO_OWNERS` adds
+    further real sign-ins, which is what turns the isolation story from a claim
+    into something two people can watch happen: both run the identical query and
+    get different rows. A synthetic owner is always appended so there is a row
+    the caller cannot see even when only one real user is seeded.
+    """
+    owners = [user]
+    seen = {user.lower()}
+    for owner in (o.strip() for o in env("DATABRICKS_DEMO_OWNERS").split(",")):
+        if owner and owner.lower() not in seen:
+            owners.append(owner)
+            seen.add(owner.lower())
+    owners.append("dana@contoso.example")
+    return owners
+
+
+def seed(
+    api: Databricks, config: Config, warehouse_id: str, catalog: str, user: str
+) -> tuple[int, int]:
+    schema = config.schema
+    qualified = f"{catalog}.{schema}"
+    orders = f"{qualified}.orders"
+    payroll = f"{qualified}.payroll"
+    row_filter = f"{qualified}.orders_row_filter"
+    mask = f"{qualified}.mask_email"
+
+    def sql(statement: str) -> None:
+        run_sql(api, config, warehouse_id, statement)
+
+    sql(f"CREATE SCHEMA IF NOT EXISTS {qualified}")
+    # Unity Catalog privileges are separate from workspace admin. A schema
+    # created by one operator cannot be rebuilt by another until ownership
+    # moves, which is what makes a second person's `azd up` fail with
+    # PERMISSION_DENIED on CREATE FUNCTION. Claiming it is harmless when the
+    # caller already owns it.
+    try:
+        sql(f"ALTER SCHEMA {qualified} OWNER TO `{user}`")
+    except BootstrapError as error:
+        log(f"could not take ownership of {qualified}: {error}")
+    log(f"schema ready: {qualified}")
+
+    # Dropping first detaches any existing filter and mask, so the functions can
+    # be replaced. Rebuilding from scratch also keeps the row counts the
+    # end-to-end harness asserts on exactly right.
+    sql(f"DROP TABLE IF EXISTS {orders}")
+    sql(f"DROP TABLE IF EXISTS {payroll}")
+
+    sql(
+        f"CREATE OR REPLACE FUNCTION {row_filter}(owner STRING) "
+        "RETURNS BOOLEAN RETURN owner = current_user()"
+    )
+    sql(
+        f"CREATE OR REPLACE FUNCTION {mask}(email STRING) RETURNS STRING RETURN "
+        f"CASE WHEN is_account_group_member('{AUDITORS_GROUP}') THEN email "
+        "ELSE concat('***@', split_part(email, '@', 2)) END"
+    )
+    log("row filter and column mask functions created")
+
+    sql(
+        f"CREATE TABLE {orders} ("
+        "order_id STRING, owner_email STRING, region STRING, "
+        "customer_email STRING, amount_cents BIGINT) "
+        "COMMENT 'Row filtered by owner_email = current_user()'"
+    )
+
+    # Three orders per owner, two of them in EU, so the per-user counts the
+    # end-to-end harness asserts on hold however many owners are seeded.
+    owners = demo_owners(user)
+    regions = ("EU", "EU", "APAC")
+    rows = []
+    for owner in owners:
+        for region in regions:
+            number = len(rows) + 1
+            rows.append(
+                (
+                    f"ORD-{number:06d}",
+                    owner,
+                    region,
+                    f"customer{number}@northwind.example",
+                    10000 + number * 1111,
+                )
+            )
+    values = ", ".join(
+        "('{}', '{}', '{}', '{}', {})".format(*row) for row in rows
+    )
+    sql(f"INSERT INTO {orders} VALUES {values}")
+    per_owner = len(regions)
+    log(f"seeded {len(rows)} rows across {len(owners)} owners, {per_owner} each")
+    for owner in owners:
+        log(f"  owner: {owner}")
+
+    sql(f"ALTER TABLE {orders} SET ROW FILTER {row_filter} ON (owner_email)")
+    sql(f"ALTER TABLE {orders} ALTER COLUMN customer_email SET MASK {mask}")
+    log("row filter and column mask attached")
+
+    sql(
+        f"CREATE TABLE {payroll} (employee STRING, salary_cents BIGINT) "
+        "COMMENT 'Deliberately never granted to the demo user'"
+    )
+    sql(f"INSERT INTO {payroll} VALUES ('{user}', 100000000)")
+
+    # Grants a non-admin consumer needs, applied for every seeded owner. The
+    # deployer is usually the catalog owner and already has these implicitly;
+    # they are stated so a customer can point the demo at a normal user and have
+    # it work unchanged.
+    sql(f"GRANT USE CATALOG ON CATALOG {catalog} TO `{user}`")
+    sql(f"GRANT USE SCHEMA ON SCHEMA {qualified} TO `{user}`")
+    sql(f"GRANT SELECT ON TABLE {orders} TO `{user}`")
+    for owner in owners:
+        if owner == user or owner.endswith("contoso.example"):
+            continue
+        # Best effort: a listed owner who is not provisioned in this workspace
+        # cannot be granted, and that should not fail the bootstrap.
+        try:
+            sql(f"GRANT USE CATALOG ON CATALOG {catalog} TO `{owner}`")
+            sql(f"GRANT USE SCHEMA ON SCHEMA {qualified} TO `{owner}`")
+            sql(f"GRANT SELECT ON TABLE {orders} TO `{owner}`")
+            log(f"granted SELECT on orders to {owner}")
+        except BootstrapError as error:
+            log(f"could not grant to {owner} (not provisioned?): {error}")
+    # payroll is deliberately never granted. Note that whoever runs this
+    # bootstrap OWNS it and can therefore still read it -- the denial is
+    # visible to the other seeded owners, not to the operator.
+    log("grants applied to orders; payroll left ungranted for non-owners")
+    return len(rows), per_owner
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--print-env",
+        action="store_true",
+        help="Print the resolved values as KEY=value for azd env set",
+    )
+    parser.add_argument(
+        "--no-seed",
+        action="store_true",
+        help=(
+            "Provision the catalog, schema and warehouse but skip the demo "
+            "orders, filters and grants. Use this when pointing the MCP server "
+            "at real data instead of the sample."
+        ),
+    )
+    args = parser.parse_args()
+
+    try:
+        config = Config.from_env()
+    except BootstrapError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    credential = AzureCliCredential()
+    arm_token = ""
+    if config.workspace_resource_id:
+        try:
+            arm_token = credential.get_token(
+                "https://management.core.windows.net/.default"
+            ).token
+        except Exception as error:  # noqa: BLE001 - best effort, not fatal
+            log(f"no ARM token ({error}); continuing without workspace elevation")
+    api = Databricks(
+        credential.get_token(DATABRICKS_SCOPE).token,
+        arm_token,
+        config.workspace_resource_id,
+    )
+    total = per_owner = 0
+    try:
+        log(f"bootstrapping Unity Catalog on {config.host}")
+        user = current_user(api, config)
+        log(f"acting as {user}")
+        ensure_metastore(api, config)
+        catalog = ensure_catalog(api, config)
+        warehouse_id = ensure_warehouse(api, config)
+        if args.no_seed:
+            log("--no-seed: leaving the schema contents alone")
+        else:
+            total, per_owner = seed(api, config, warehouse_id, catalog, user)
+    except BootstrapError as error:
+        print(f"\nerror: {error}", file=sys.stderr)
+        return 1
+    finally:
+        api.close()
+
+    # The catalog is echoed back because the fallback may have chosen a
+    # different one than was asked for, and the MCP server needs the real name.
+    # The seeded total is echoed because it varies with DATABRICKS_DEMO_OWNERS,
+    # and the harness asserts the caller sees strictly fewer rows than exist.
+    resolved = {
+        "DATABRICKS_WAREHOUSE_ID": warehouse_id,
+        "DATABRICKS_CATALOG": catalog,
+    }
+    if not args.no_seed:
+        resolved["DATABRICKS_SEEDED_TOTAL"] = str(total)
+        resolved["DATABRICKS_SEEDED_PER_OWNER"] = str(per_owner)
+    log("Unity Catalog is ready.")
+    if args.print_env:
+        for key, value in resolved.items():
+            print(f"{key}={value}")
+    else:
+        print(json.dumps(resolved, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

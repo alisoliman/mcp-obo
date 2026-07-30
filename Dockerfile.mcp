@@ -17,4 +17,8 @@ COPY src ./src
 
 USER 65532:65532
 EXPOSE 8000
-CMD ["python", "src/server.py"]
+# Module form, not `python src/server.py`. Running the file directly puts
+# /app/src on sys.path instead of /app, and the server imports its siblings as
+# `src.obo` / `src.databricks` so the tests and the image resolve them the same
+# way.
+CMD ["python", "-m", "src.server"]

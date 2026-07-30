@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
 import tempfile
 import unittest
 from itertools import count
@@ -8,11 +10,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+from fastmcp.server.auth.providers.azure import AzureJWTVerifier
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 
+import src.orders as orders
 import src.server as server
+from src import databricks
+from src.databricks import DATABRICKS_TOOLS
+from src.orders import ORDER_TOOLS
 from src.chat import (
+    allowed_tools,
     ChatRequest,
     Settings,
     _safe_event_value,
@@ -21,7 +30,8 @@ from src.chat import (
     _workload_assertion,
     create_app,
 )
-from src.server import (
+from src.obo import DATABRICKS_RESOURCE_APP_ID, DATABRICKS_SCOPE, GRAPH_SCOPE
+from src.orders import (
     GraphUser,
     OrderItem,
     OrderStatus,
@@ -35,11 +45,24 @@ from src.server import (
 
 ROOT = Path(__file__).resolve().parent
 
+MCP_ENVIRONMENT = {
+    "AZURE_TENANT_ID": "11111111-1111-1111-1111-111111111111",
+    "ENTRA_SERVER_CLIENT_ID": "22222222-2222-2222-2222-222222222222",
+    "MCP_SERVER_URL": "https://orders.example.test",
+    "MCP_MODE": "orders",
+}
+DATABRICKS_ENVIRONMENT = {
+    "DATABRICKS_HOST": "https://adb-1234567890.11.azuredatabricks.net",
+    "DATABRICKS_WAREHOUSE_ID": "0123456789abcdef",
+    "DATABRICKS_CATALOG": "mcp_obo_demo",
+    "DATABRICKS_SCHEMA": "sales",
+}
+
 
 class OrderTests(unittest.TestCase):
     def setUp(self) -> None:
-        server._orders.clear()
-        server._order_numbers = count(1)
+        orders._orders.clear()
+        orders._order_numbers = count(1)
 
     def test_create_calculates_total_and_lists_by_owner(self) -> None:
         order = create_order_for(
@@ -126,40 +149,215 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(proof.evidence, "Microsoft Graph /me via OBO")
 
 
-class ServerContractTests(unittest.TestCase):
+class McpServerTests(unittest.TestCase):
     def test_server_requires_user_scope_and_exposes_only_order_tools(self) -> None:
-        environment = {
-            "AZURE_TENANT_ID": "11111111-1111-1111-1111-111111111111",
-            "ENTRA_SERVER_CLIENT_ID": "22222222-2222-2222-2222-222222222222",
-            "MCP_SERVER_URL": "https://orders.example.test",
-        }
+        # DATABRICKS_HOST is cleared explicitly: the Databricks tools register
+        # themselves off it, so a developer with the workspace configured in
+        # their shell would otherwise see this test fail for the wrong reason.
+        environment = dict(MCP_ENVIRONMENT, DATABRICKS_HOST="")
         with patch.dict("os.environ", environment, clear=False):
             mcp = server.create_server()
             tools = asyncio.run(mcp.list_tools())
 
+        # The chat client passes ORDER_TOOLS as `allowed_tools`, so a tool added
+        # on one side and not the other would silently never be callable.
+        self.assertEqual({tool.name for tool in tools}, ORDER_TOOLS)
         self.assertEqual(
-            {tool.name for tool in tools},
-            {
-                "list_orders",
-                "get_order",
-                "create_order",
-                "update_order_status",
-                "who_am_i",
-            },
+            mcp.auth.token_verifier.required_scopes, ["Mcp.Tools.ReadWrite"]
         )
-        long_text = "x" * 5_000
-        self.assertIn(long_text, _sse_text_event("response.delta", long_text))
-        duplicate_result = [
-            SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
-            SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
-        ]
-        self.assertEqual(
-            _tool_result_value(duplicate_result),
-            {"display_name": "Ada"},
-        )
-        self.assertEqual(mcp.auth.token_verifier.required_scopes, ["Mcp.Tools.ReadWrite"])
+        # The caller's token is injected by FastMCP, never accepted as an
+        # argument, so a model cannot talk the server into a different identity.
         for tool in tools:
             self.assertNotIn("access_token", tool.parameters.get("properties", {}))
+
+    def test_token_audience_is_pinned_to_this_server(self) -> None:
+        client_id = MCP_ENVIRONMENT["ENTRA_SERVER_CLIENT_ID"]
+        tenant_id = MCP_ENVIRONMENT["AZURE_TENANT_ID"]
+        verifier = AzureJWTVerifier(
+            client_id=client_id,
+            tenant_id=tenant_id,
+            required_scopes=["Mcp.Tools.ReadWrite"],
+        )
+        # A token minted for any other resource fails audience validation, even
+        # if it carries a scope with the same name.
+        self.assertEqual(
+            set(verifier.audience), {client_id, f"api://{client_id}"}
+        )
+        self.assertEqual(
+            verifier.issuer,
+            f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        )
+
+
+class DatabricksToolTests(unittest.TestCase):
+    """Databricks mode, checked without a workspace.
+
+    What a unit test can prove here is narrow but worth pinning: the mode
+    selects the right tools, the query is not assembled from caller input, and
+    the Entra permission is delegated rather than application. Whether Unity
+    Catalog actually filters rows is a deployment fact, checked by the
+    end-to-end harness in `test_databricks_e2e.py`.
+    """
+
+    def test_databricks_mode_replaces_the_order_tools(self) -> None:
+        environment = dict(
+            MCP_ENVIRONMENT, MCP_MODE="databricks", **DATABRICKS_ENVIRONMENT
+        )
+        with patch.dict("os.environ", environment, clear=False):
+            mcp = server.create_server()
+            tools = asyncio.run(mcp.list_tools())
+            allowed = allowed_tools()
+
+        # The modes are alternatives, not layers: databricks mode serves the
+        # Databricks tools and nothing else.
+        self.assertEqual({tool.name for tool in tools}, set(DATABRICKS_TOOLS))
+        self.assertEqual({tool.name for tool in tools} & set(ORDER_TOOLS), set())
+        # And the chat's allow-list follows the same mode, so a tool on the
+        # server is always reachable from the UI and vice versa.
+        self.assertEqual(allowed, DATABRICKS_TOOLS)
+        for tool in tools:
+            self.assertNotIn("access_token", tool.parameters.get("properties", {}))
+
+    def test_orders_mode_serves_only_the_order_tools(self) -> None:
+        # Databricks settings present but the mode says orders: the workspace
+        # config is ignored rather than quietly bolted on.
+        environment = dict(
+            MCP_ENVIRONMENT, MCP_MODE="orders", **DATABRICKS_ENVIRONMENT
+        )
+        with patch.dict("os.environ", environment, clear=False):
+            mcp = server.create_server()
+            tools = asyncio.run(mcp.list_tools())
+            allowed = allowed_tools()
+
+        self.assertEqual({tool.name for tool in tools}, set(ORDER_TOOLS))
+        self.assertEqual(allowed, ORDER_TOOLS)
+
+    def test_an_unknown_mode_fails_at_startup(self) -> None:
+        environment = dict(MCP_ENVIRONMENT, MCP_MODE="postgres")
+        with patch.dict("os.environ", environment, clear=False), self.assertRaisesRegex(
+            RuntimeError, "MCP_MODE must be one of"
+        ):
+            server.create_server()
+
+    def test_databricks_mode_without_a_workspace_fails_at_startup(self) -> None:
+        environment = dict(
+            MCP_ENVIRONMENT, MCP_MODE="databricks", DATABRICKS_HOST=""
+        )
+        with patch.dict("os.environ", environment, clear=False), self.assertRaisesRegex(
+            RuntimeError, "requires DATABRICKS_HOST"
+        ):
+            server.create_server()
+
+    def test_partial_databricks_configuration_fails_at_startup(self) -> None:
+        # Half-configured is worse than absent: the tools would appear in the
+        # tool list and fail on first call, so startup refuses instead.
+        environment = dict(
+            MCP_ENVIRONMENT,
+            MCP_MODE="databricks",
+            DATABRICKS_HOST=DATABRICKS_ENVIRONMENT["DATABRICKS_HOST"],
+            DATABRICKS_WAREHOUSE_ID="",
+            DATABRICKS_CATALOG="",
+            DATABRICKS_SCHEMA="",
+        )
+        with patch.dict("os.environ", environment, clear=False), self.assertRaisesRegex(
+            RuntimeError, "DATABRICKS_WAREHOUSE_ID"
+        ):
+            server.create_server()
+
+    def test_query_binds_parameters_instead_of_building_sql(self) -> None:
+        statement = databricks.orders_statement("cat.sales.orders")
+        injection = "EU' OR '1'='1"
+        parameters = databricks.orders_parameters(injection, 25)
+
+        # The attacker-controlled string reaches Databricks as a bound value,
+        # never as statement text.
+        self.assertNotIn(injection, statement)
+        self.assertIn(":region", statement)
+        self.assertIn(":row_limit", statement)
+        self.assertEqual(
+            parameters,
+            [
+                {"name": "region", "type": "STRING", "value": injection},
+                {"name": "row_limit", "type": "INT", "value": "25"},
+            ],
+        )
+
+        # A region of None must send no `value` at all. Sending an empty string
+        # would make `:region IS NULL` false and silently return zero rows.
+        self.assertEqual(
+            databricks.orders_parameters(None, 5)[0],
+            {"name": "region", "type": "STRING"},
+        )
+
+    def test_catalog_identifiers_are_rejected_when_not_plain(self) -> None:
+        environment = dict(
+            MCP_ENVIRONMENT,
+            MCP_MODE="databricks",
+            **{**DATABRICKS_ENVIRONMENT, "DATABRICKS_CATALOG": "cat; DROP TABLE x"},
+        )
+        with patch.dict("os.environ", environment, clear=False), self.assertRaisesRegex(
+            RuntimeError, "valid Unity Catalog"
+        ):
+            server.create_server()
+
+    def test_the_two_downstream_scopes_differ_only_by_resource(self) -> None:
+        self.assertEqual(GRAPH_SCOPE, "https://graph.microsoft.com/.default")
+        self.assertEqual(DATABRICKS_SCOPE, f"{DATABRICKS_RESOURCE_APP_ID}/.default")
+        # A fixed Azure constant, identical in every tenant.
+        self.assertEqual(
+            DATABRICKS_RESOURCE_APP_ID, "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+        )
+
+    def test_no_application_permission_is_ever_requested(self) -> None:
+        # Compiled, not grepped. `type: 'Role'` is how a Bicep resourceAccess
+        # entry asks for an application permission — one that works with no user
+        # present — and the whole accelerator rests on there being none, for
+        # Graph or for Databricks. Asserting against the ARM JSON means a
+        # rename or a refactor cannot quietly turn this green.
+        compiled = subprocess.run(
+            ["az", "bicep", "build", "--file", str(ROOT / "infra" / "main.bicep"),
+             "--stdout"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if compiled.returncode != 0:
+            self.skipTest("az bicep is unavailable")
+
+        template = json.loads(compiled.stdout)
+        resources = template["resources"]
+        entries = resources.values() if isinstance(resources, dict) else resources
+
+        requested = [
+            access
+            for resource in entries
+            if str(resource.get("type", "")).startswith("Microsoft.Graph/applications")
+            for required in (
+                resource.get("properties", {}).get("requiredResourceAccess") or []
+            )
+            # Some entries are ARM expression strings that copy another
+            # application's list verbatim — the list itself is checked where it
+            # is declared, so following the reference would only double-count.
+            if isinstance(required, dict)
+            for access in (required.get("resourceAccess") or [])
+        ]
+        self.assertTrue(requested, "expected the delegated permissions to be present")
+        for access in requested:
+            self.assertEqual(
+                access.get("type"), "Scope", f"application permission found: {access}"
+            )
+
+        # And the delegated Databricks permission is the one actually asked for.
+        # Permission ids compile to variable references, so the value is checked
+        # where the compiler resolved it.
+        self.assertEqual(
+            template["variables"]["databricksUserImpersonationScopeId"],
+            "739272be-e143-11e8-9f32-f2801f1b9fd1",
+        )
+        self.assertEqual(
+            template["variables"]["databricksAppId"],
+            "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d",
+        )
 
 
 class FakeMsalApp:
@@ -310,15 +508,7 @@ class ChatTests(unittest.TestCase):
         (assets / "app.js").write_text("window.ORDER_AGENT = true", encoding="utf-8")
         return root
 
-    def test_workload_assertion_and_chat_input_validation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            token_file = Path(directory) / "token"
-            token_file.write_text(" assertion \n", encoding="utf-8")
-            self.assertEqual(_workload_assertion(self.settings(token_file)), "assertion")
-
-        self.assertEqual(ChatRequest(message=" list orders ").message, " list orders ")
-        with self.assertRaises(ValidationError):
-            ChatRequest(message="")
+    def test_stream_events_are_sanitized_before_reaching_the_browser(self) -> None:
         self.assertEqual(
             _safe_event_value(
                 {
@@ -333,6 +523,29 @@ class ChatTests(unittest.TestCase):
                 "message": "safe",
             },
         )
+        # Agent text is never truncated on its way to the transcript, unlike
+        # the tool payloads that `_safe_event_value` caps.
+        long_text = "x" * 5_000
+        self.assertIn(long_text, _sse_text_event("response.delta", long_text))
+        # FastMCP returns one text block per content item; identical blocks
+        # should collapse to a single parsed result rather than a list.
+        duplicate_result = [
+            SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
+            SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
+        ]
+        self.assertEqual(
+            _tool_result_value(duplicate_result), {"display_name": "Ada"}
+        )
+
+    def test_workload_assertion_and_chat_input_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "token"
+            token_file.write_text(" assertion \n", encoding="utf-8")
+            self.assertEqual(_workload_assertion(self.settings(token_file)), "assertion")
+
+        self.assertEqual(ChatRequest(message=" list orders ").message, " list orders ")
+        with self.assertRaises(ValidationError):
+            ChatRequest(message="")
 
     def test_live_client_flow_forwards_user_token_to_agent_mcp_tool(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -374,15 +587,23 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(session_payload["profile"]["name"], "Ada")
                 self.assertTrue(session_payload["historyKey"])
                 self.assertEqual(session_payload["model"], "gpt-5.6-terra")
+                # Derived from allowed_tools() rather than restated, so wiring a new
+                # tool into the agent updates this in one place. The order
+                # tools are named explicitly as well, so the Graph half of the
+                # demo cannot quietly disappear from the UI.
                 self.assertEqual(
                     session_payload["mcp"]["tools"],
-                    [
+                    sorted(allowed_tools()),
+                )
+                self.assertLessEqual(
+                    {
                         "create_order",
                         "get_order",
                         "list_orders",
                         "update_order_status",
                         "who_am_i",
-                    ],
+                    },
+                    set(session_payload["mcp"]["tools"]),
                 )
 
                 response = client.post(
@@ -425,13 +646,7 @@ class ChatTests(unittest.TestCase):
                 "model": "gpt-5.6-terra",
                 "mcp": {
                     "name": "Order MCP",
-                    "tools": [
-                        "create_order",
-                        "get_order",
-                        "list_orders",
-                        "update_order_status",
-                        "who_am_i",
-                    ],
+                    "tools": sorted(allowed_tools()),
                 },
             },
         )
@@ -504,45 +719,34 @@ class ChatTests(unittest.TestCase):
                 )
 
 
-class DeploymentContractTests(unittest.TestCase):
-    def test_bicep_declares_two_apps_foundry_and_native_consent(self) -> None:
-        bicep = (ROOT / "infra" / "main.bicep").read_text(encoding="utf-8")
-        self.assertIn("Microsoft.CognitiveServices/accounts/projects@2025-06-01", bicep)
-        self.assertIn("var modelName = 'gpt-5.6-terra'", bicep)
-        self.assertIn("Microsoft.Graph/oauth2PermissionGrants@v1.0", bicep)
-        self.assertIn("'${appUrl}/auth/callback'", bicep)
-        self.assertIn("isFallbackPublicClient: false", bicep)
-        self.assertIn("redirectUris: []", bicep)
+class IngressRoutingTests(unittest.TestCase):
+    """The one deployment fact the Python tests can meaningfully check.
 
-    def test_azd_uses_two_aks_services_without_python_deployer(self) -> None:
-        azure_yaml = (ROOT / "azure.yaml").read_text(encoding="utf-8")
-        self.assertIn("  mcp:\n", azure_yaml)
-        self.assertIn("  chat:\n", azure_yaml)
-        self.assertIn("host: aks", azure_yaml)
-        self.assertIn("helm upgrade --install", azure_yaml)
-        self.assertFalse((ROOT / "scripts" / "deploy.py").exists())
+    Everything else about the deployment is validated by the tools that own it:
+    `az bicep build` for the template, `azd provision --preview` for the plan,
+    and the two Dockerfiles by the build itself.
+    """
 
-    def test_chat_image_builds_and_serves_the_shadcn_frontend(self) -> None:
-        dockerfile = (ROOT / "Dockerfile.chat").read_text(encoding="utf-8")
-        app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
-        self.assertIn("FROM node:22-alpine AS frontend", dockerfile)
-        self.assertIn("COPY --from=frontend /frontend/dist ./frontend/dist", dockerfile)
-        self.assertIn("MessageScrollerProvider", app)
-        self.assertIn("BubbleContent", app)
-        self.assertIn('fetch("/api/session"', app)
-        self.assertIn('fetch("/api/chat/stream"', app)
-        self.assertIn("<ToolHeader", app)
-        self.assertIn("historyStorageKey(session.historyKey)", app)
-        self.assertIn('role="log"', app)
-
-    def test_ingress_routes_chat_and_mcp_separately(self) -> None:
-        ingress = (ROOT / "k8s" / "chat" / "ingress.yaml").read_text(
-            encoding="utf-8"
+    def test_mcp_paths_reach_the_mcp_service_and_the_rest_reaches_chat(self) -> None:
+        ingress = yaml.safe_load(
+            (ROOT / "k8s" / "chat" / "ingress.yaml").read_text(encoding="utf-8")
         )
-        self.assertIn("path: /mcp", ingress)
-        self.assertIn("name: fastmcp-orders", ingress)
-        self.assertIn("path: /", ingress)
-        self.assertIn("name: order-agent-chat", ingress)
+        (rule,) = ingress["spec"]["rules"]
+        routes = {
+            path["path"]: path["backend"]["service"]["name"]
+            for path in rule["http"]["paths"]
+        }
+
+        self.assertEqual(
+            routes,
+            {
+                # Discovery metadata and the MCP endpoint itself belong to the
+                # protected resource, not the chat app that fronts it.
+                "/.well-known/oauth-protected-resource/mcp": "fastmcp-orders",
+                "/mcp": "fastmcp-orders",
+                "/": "order-agent-chat",
+            },
+        )
 
 
 if __name__ == "__main__":

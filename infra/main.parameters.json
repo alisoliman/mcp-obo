@@ -10,6 +10,12 @@
     },
     "principalId": {
       "value": "${AZURE_PRINCIPAL_ID}"
+    },
+    "harnessClientAppId": {
+      "value": "${HARNESS_CLIENT_APP_ID=}"
+    },
+    "deploymentMode": {
+      "value": "${MCP_MODE=orders}"
     }
   }
 }

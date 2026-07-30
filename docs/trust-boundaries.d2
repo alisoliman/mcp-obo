@@ -1,0 +1,158 @@
+# What each credential can reach on its own — and the door that is deliberately missing.
+# Render: d2 docs/trust-boundaries.d2 docs/trust-boundaries.svg
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    pad: 20
+  }
+}
+
+direction: right
+
+classes: {
+  cred: {
+    style: {
+      fill: "#FFFFFF"
+      stroke: "#075726"
+      stroke-width: 2
+      font-color: "#0B1219"
+      border-radius: 8
+    }
+  }
+  user: {
+    style: {
+      fill: "#DBF2E0"
+      stroke: "#006731"
+      stroke-width: 2
+      font-color: "#0B1219"
+      border-radius: 8
+    }
+  }
+  resource: {
+    style: {
+      fill: "#D9EAFA"
+      stroke: "#0068B2"
+      stroke-width: 2
+      font-color: "#0B1219"
+      border-radius: 8
+    }
+  }
+  prize: {
+    style: {
+      fill: "#DBF2E0"
+      stroke: "#006731"
+      stroke-width: 3
+      font-color: "#0B1219"
+      border-radius: 8
+      bold: true
+    }
+  }
+  group: {
+    style: {
+      fill: "#EFF2F6"
+      stroke: "#B0B8C1"
+      font-color: "#4A545D"
+      border-radius: 10
+    }
+  }
+}
+
+held: {
+  label: "Credentials that exist in this system"
+  class: group
+
+  chatwi: {
+    label: "Chat pod\nworkload identity"
+    class: cred
+  }
+  mcpwi: {
+    label: "MCP pod\nworkload identity"
+    class: cred
+  }
+  usertok: {
+    label: "User's delegated token\nacquired only by signing in"
+    class: user
+  }
+}
+
+reach: {
+  label: "What they reach"
+  class: group
+
+  foundry: {
+    label: "Foundry inference"
+    class: resource
+  }
+  mcpcall: {
+    label: "MCP tool call\naccepted"
+    class: resource
+  }
+  me: {
+    label: "Graph /me\nresolves a person"
+    class: resource
+  }
+  orders: {
+    label: "That person's orders"
+    class: prize
+  }
+}
+
+held.chatwi -> reach.foundry: "alone, this is enough" {
+  style.stroke: "#0068B2"
+  style.stroke-width: 2
+}
+
+held.usertok -> reach.mcpcall: "audience + scope check" {
+  style.stroke: "#006731"
+  style.stroke-width: 3
+}
+
+held.mcpwi -> reach.me: "alone: nothing.\nGraph /me has no meaning\nwithout a user" {
+  target-arrowhead.shape: cross
+  style: {
+    stroke: "#A92227"
+    stroke-width: 2
+    stroke-dash: 5
+  }
+}
+
+reach.mcpcall -> reach.me: "OBO: user token\n+ MCP workload identity" {
+  style.stroke: "#006731"
+  style.stroke-width: 3
+}
+
+reach.me -> reach.orders: "store partitioned\nby Graph object id" {
+  style.stroke: "#006731"
+  style.stroke-width: 3
+}
+
+held.chatwi -> reach.mcpcall: "no application permission\nexists on this path" {
+  target-arrowhead.shape: cross
+  style: {
+    stroke: "#A92227"
+    stroke-width: 2
+    stroke-dash: 5
+  }
+}
+
+note: |md
+  ### The property this buys
+
+  Order data needs a **user's token** *and* a **pod's identity**.
+
+  Neither one alone is sufficient.
+
+  Only a human sign-in mints the first.
+
+  So no application-only path to another person's data exists,
+
+  and there is no service account to steal that would create one.
+| {
+  near: bottom-center
+  style: {
+    fill: "#FFFFFF"
+    stroke: "#B0B8C1"
+    font-color: "#0B1219"
+  }
+}

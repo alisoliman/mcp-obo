@@ -1,0 +1,103 @@
+# The second on-behalf-of exchange: the same user token, a different resource.
+# Render: d2 docs/databricks-obo.d2 docs/databricks-obo.svg
+
+vars: {
+  d2-config: {
+    pad: 20
+  }
+}
+
+shape: sequence_diagram
+
+chat: {
+  label: "order-agent-chat\nconfidential client"
+  style: {
+    fill: "#FFFFFF"
+    stroke: "#075726"
+    stroke-width: 2
+  }
+}
+mcp: {
+  label: "fastmcp-orders\nresource server"
+  style: {
+    fill: "#FFFFFF"
+    stroke: "#075726"
+    stroke-width: 2
+  }
+}
+entra: {
+  label: "Microsoft\nEntra ID"
+  style: {
+    fill: "#D9EAFA"
+    stroke: "#0068B2"
+    stroke-width: 2
+  }
+}
+warehouse: {
+  label: "Databricks\nSQL warehouse"
+  style: {
+    fill: "#D9EAFA"
+    stroke: "#0068B2"
+    stroke-width: 2
+  }
+}
+uc: {
+  label: "Unity\nCatalog"
+  style: {
+    fill: "#FDE7E9"
+    stroke: "#A4262C"
+    stroke-width: 2
+  }
+}
+
+arrive: {
+  label: "The same token that reaches the order tools"
+
+  chat -> mcp: "POST /mcp — databricks_query_orders\nAuthorization: Bearer <user's token>" {
+    style.stroke: "#006731"
+    style.stroke-width: 3
+    style.bold: true
+  }
+  mcp -> mcp: "verify issuer, audience,\nand the Mcp.Tools.ReadWrite scope"
+}
+
+exchange: {
+  label: "One line different from the Graph exchange"
+
+  mcp -> entra: "OBO grant — scope\n2ff814a6-…/.default\ninstead of graph.microsoft.com/.default" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  entra -> mcp: "Databricks token, still the user\n(delegated user_impersonation only)" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+}
+
+query: {
+  label: "Where the authorization actually happens"
+
+  mcp -> warehouse: "POST /api/2.0/sql/statements\nfixed SQL + bound parameters" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  warehouse -> uc: "who is current_user(),\nand what may they see?" {
+    style.stroke: "#A4262C"
+    style.stroke-width: 2
+  }
+  uc -> uc: "row filter: owner_email = current_user()\ncolumn mask: customer_email\ntable grants: orders yes, payroll no" {
+    style.stroke: "#A4262C"
+  }
+  uc -> warehouse: "3 of 9 rows, email masked" {
+    style.stroke: "#A4262C"
+    style.stroke-width: 2
+  }
+  warehouse -> mcp: "already-scoped result set" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  mcp -> chat: "the server filtered nothing —\nit never had the other six rows" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+}

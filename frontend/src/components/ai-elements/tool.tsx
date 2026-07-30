@@ -25,10 +25,12 @@ const status: Record<
   running: {
     label: "Running",
     icon: <ClockIcon className="size-3.5 animate-pulse" />,
+    className: "text-muted-foreground",
   },
   completed: {
     label: "Completed",
-    icon: <CheckCircleIcon className="size-3.5 text-primary" />,
+    icon: <CheckCircleIcon className="size-3.5 text-success" />,
+    className: "text-muted-foreground",
   },
   error: {
     label: "Error",
@@ -44,7 +46,7 @@ function JsonValue({ value }: { value: unknown }) {
   const text =
     typeof value === "string" ? value : JSON.stringify(value, null, 2)
   return (
-    <pre className="max-h-64 overflow-auto rounded-md bg-muted/60 p-3 font-mono text-xs leading-5 whitespace-pre-wrap">
+    <pre className="max-h-64 overflow-auto rounded-md border bg-muted/50 p-3 font-mono text-xs leading-5 whitespace-pre-wrap">
       {text}
     </pre>
   )
@@ -56,7 +58,10 @@ export function Tool({
 }: ComponentProps<typeof Collapsible>) {
   return (
     <Collapsible
-      className={cn("group/tool w-full rounded-lg border bg-background", className)}
+      className={cn(
+        "group/tool w-full overflow-hidden rounded-lg border bg-card shadow-[var(--shadow-raised)]",
+        className
+      )}
       {...props}
     />
   )
@@ -71,28 +76,28 @@ export function ToolHeader({
   state: ToolState
   verified?: boolean
 }) {
-  const current =
-    verified && state === "completed"
-      ? {
-          label: "Identity verified",
-          icon: <ShieldCheckIcon className="size-3.5 text-primary" />,
-          className: undefined,
-        }
-      : status[state]
+  const isVerified = verified && state === "completed"
+  const current = isVerified
+    ? {
+        label: "Identity verified",
+        icon: <ShieldCheckIcon className="size-3.5 text-success" />,
+        className: "border-success/40 bg-success-soft text-success",
+      }
+    : status[state]
   return (
-    <CollapsibleTrigger className="flex w-full items-center justify-between gap-4 p-3 text-left">
+    <CollapsibleTrigger className="flex w-full items-center justify-between gap-4 p-3 text-left transition-colors duration-150 hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none">
       <span className="flex min-w-0 items-center gap-2">
-        <WrenchIcon className="size-4 shrink-0 text-[var(--protocol)]" />
+        <WrenchIcon className="size-4 shrink-0 text-protocol" />
         <span className="truncate text-sm font-medium">{name}</span>
         <Badge
-          variant="secondary"
-          className={cn("gap-1.5 text-xs", current.className)}
+          variant="outline"
+          className={cn("gap-1.5 text-xs font-normal", current.className)}
         >
           {current.icon}
           {current.label}
         </Badge>
       </span>
-      <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/tool:rotate-180" />
+      <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]/tool:rotate-180" />
     </CollapsibleTrigger>
   )
 }

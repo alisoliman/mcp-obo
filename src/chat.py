@@ -1,3 +1,16 @@
+"""Order agent chat: the confidential client in the delegated OBO flow.
+
+The workload's own AKS identity is used for exactly two things — signing the
+client assertion during the authorization code flow, and authenticating to
+Microsoft Foundry for inference. It is never used to call the MCP server.
+
+Every MCP request instead carries the signed-in user's delegated token, taken
+from that user's server-side MSAL cache and set as the `Authorization` header
+on the httpx client that `MCPStreamableHTTPTool` uses. Tokens stay on the
+server; the browser only ever sees a session cookie, a CSRF token, and the
+sanitized tool events streamed back over SSE.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -37,18 +50,51 @@ from starlette.responses import (
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from src.databricks import DATABRICKS_TOOLS
+from src.orders import ORDER_TOOLS
+from src.server import DATABRICKS_MODE, current_mode
+
 
 COOKIE_NAME = "order_agent_session"
 SESSION_TTL_SECONDS = 8 * 60 * 60
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FRONTEND_DIST = ROOT / "frontend" / "dist"
-ORDER_TOOLS = {
-    "who_am_i",
-    "list_orders",
-    "get_order",
-    "create_order",
-    "update_order_status",
-}
+ORDERS_INSTRUCTIONS = (
+    "You help the signed-in user with their orders. "
+    "Use the order tools for order facts and never invent order data. "
+    "Only create an order or change status when the user explicitly asks. "
+    "When asked to prove identity or OBO, call who_am_i and report its "
+    "display name, identity fingerprint, and evidence exactly."
+)
+DATABRICKS_INSTRUCTIONS = (
+    "You answer questions about the signed-in user's orders, which live in a "
+    "Unity Catalog table in Azure Databricks. "
+    "Use databricks_query_orders for order data and never invent rows. "
+    "Call databricks_whoami when asked which identity Databricks resolved, and "
+    "report its results exactly. "
+    "Unity Catalog filters rows and masks columns before you see them, so never "
+    "present a masked value as if it were real, and when it comes up say plainly "
+    "that the filtering happened in Databricks rather than in this application."
+)
+
+
+def allowed_tools() -> frozenset[str]:
+    """The tool names for the mode this deployment is running.
+
+    Imported from the tool modules rather than restated, so a tool renamed on
+    the server cannot silently drop out of the agent's allow-list.
+    """
+    return DATABRICKS_TOOLS if current_mode() == DATABRICKS_MODE else ORDER_TOOLS
+
+
+def agent_instructions() -> str:
+    return (
+        DATABRICKS_INSTRUCTIONS
+        if current_mode() == DATABRICKS_MODE
+        else ORDERS_INSTRUCTIONS
+    )
+
+
 logger = logging.getLogger(__name__)
 _SENSITIVE_EVENT_KEYS = (
     "access_token",
@@ -118,7 +164,9 @@ class ChatRequest(BaseModel):
 
 
 def _safe_event_value(value: Any, *, depth: int = 0) -> Any:
-    if depth >= 5:
+    # Tool payloads nest at most list[order] -> items -> item -> leaf, so this
+    # ceiling only trips on something unexpected.
+    if depth >= 8:
         return "[truncated]"
     if isinstance(value, BaseModel):
         return _safe_event_value(value.model_dump(mode="json"), depth=depth + 1)
@@ -254,6 +302,9 @@ def _save_cache(session: BrowserSession, cache: SerializableTokenCache) -> None:
 
 
 def _cookie(response: Response, session_id: str) -> None:
+    # Entra returns the authorization code as a cross-site form POST, which a
+    # SameSite=Lax cookie would not accompany. Every state-changing route
+    # therefore checks the CSRF header instead of relying on SameSite.
     response.set_cookie(
         COOKIE_NAME,
         session_id,
@@ -305,7 +356,7 @@ def create_app(
             "model": config.foundry_model,
             "mcp": {
                 "name": "Order MCP",
-                "tools": sorted(ORDER_TOOLS),
+                "tools": sorted(allowed_tools()),
             },
         }
         active = current_session(request)
@@ -459,7 +510,7 @@ def create_app(
                         name="orders",
                         description="Order tools for the signed-in user.",
                         url=config.mcp_endpoint,
-                        allowed_tools=ORDER_TOOLS,
+                        allowed_tools=allowed_tools(),
                         approval_mode="never_require",
                         load_prompts=False,
                         http_client=mcp_http,
@@ -471,13 +522,7 @@ def create_app(
                             credential=credential,
                         ),
                         name="OrderAgent",
-                        instructions=(
-                            "You help the signed-in user with their orders. "
-                            "Use the order tools for order facts and never invent order data. "
-                            "Only create an order or change status when the user explicitly asks. "
-                            "When asked to prove identity or OBO, call who_am_i and report its "
-                            "display name, identity fingerprint, and evidence exactly."
-                        ),
+                        instructions=agent_instructions(),
                         tools=[mcp],
                     )
                     async with agent:
