@@ -151,27 +151,29 @@ const identitySteps = [
     icon: UserRound,
     label: "Signed-in user",
     detail: "Delegated Entra session",
-    tone: "primary",
+    tone: "identity",
   },
   {
     icon: Bot,
     label: "Agent runtime",
     detail: "Microsoft Foundry",
-    tone: "accent",
+    tone: "protocol",
   },
   {
     icon: Wrench,
     label: "Order MCP",
     detail: "User token forwarded",
-    tone: "accent",
+    tone: "protocol",
   },
   {
     icon: Database,
     label: "Microsoft Graph",
     detail: "Token exchange + Graph /me",
-    tone: "primary",
+    tone: "identity",
   },
 ] as const
+
+type IdentityStep = (typeof identitySteps)[number]
 
 function storedTheme(): Theme {
   const saved = localStorage.getItem(THEME_KEY)
@@ -191,7 +193,7 @@ function useTheme() {
     document.documentElement.style.colorScheme = theme
     document
       .querySelector<HTMLMetaElement>('meta[name="theme-color"]')
-      ?.setAttribute("content", theme === "dark" ? "#09090b" : "#ffffff")
+      ?.setAttribute("content", theme === "dark" ? "#030406" : "#eff2f6")
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
@@ -388,11 +390,49 @@ function ConnectionStatus({ label = "Session active" }: { label?: string }) {
   return (
     <span className="inline-flex items-center gap-2 text-xs font-medium text-muted-foreground">
       <span className="relative flex size-2" aria-hidden="true">
-        <span className="absolute inline-flex size-full rounded-full bg-primary/30" />
-        <span className="relative inline-flex size-2 rounded-full bg-primary" />
+        <span className="absolute inline-flex size-full rounded-full bg-success/30" />
+        <span className="relative inline-flex size-2 rounded-full bg-success" />
       </span>
       {label}
     </span>
+  )
+}
+
+/* One step renderer for both the signed-out panel and the signed-in rail, so
+   the green=identity / blue=protocol language cannot drift between views. */
+function IdentityStepRow({
+  step,
+  connected = false,
+}: {
+  step: IdentityStep
+  connected?: boolean
+}) {
+  const Icon = step.icon
+  return (
+    <li className={cn("relative flex gap-3", connected ? "pb-6" : "items-center")}>
+      {connected && (
+        <span
+          className="absolute top-8 bottom-0 left-4 w-px bg-border"
+          aria-hidden="true"
+        />
+      )}
+      <span
+        className={cn(
+          "relative z-10 flex size-8 shrink-0 items-center justify-center rounded-md border bg-card",
+          step.tone === "identity"
+            ? "border-success/35 text-success"
+            : "border-protocol/35 text-protocol"
+        )}
+      >
+        <Icon className="size-4" />
+      </span>
+      <span className={cn("min-w-0", connected ? "pt-0.5" : "flex-1")}>
+        <span className="block text-sm font-medium">{step.label}</span>
+        <span className="block text-xs leading-5 text-muted-foreground">
+          {step.detail}
+        </span>
+      </span>
+    </li>
   )
 }
 
@@ -412,35 +452,13 @@ function ContextRail({ session }: { session: SessionInfo }) {
           Identity path
         </p>
         <ol className="relative space-y-1" aria-label="Delegated identity path">
-          {identitySteps.map((step, index) => {
-            const Icon = step.icon
-            return (
-              <li key={step.label} className="relative flex gap-3 pb-6">
-                {index < identitySteps.length - 1 && (
-                  <span
-                    className="absolute top-8 bottom-0 left-4 w-px bg-border"
-                    aria-hidden="true"
-                  />
-                )}
-                <span
-                  className={cn(
-                    "relative z-10 flex size-8 shrink-0 items-center justify-center rounded-md border bg-background",
-                    step.tone === "primary"
-                      ? "text-primary"
-                      : "text-[var(--protocol)]"
-                  )}
-                >
-                  <Icon className="size-4" />
-                </span>
-                <span className="min-w-0 pt-0.5">
-                  <span className="block text-sm font-medium">{step.label}</span>
-                  <span className="block text-xs leading-5 text-muted-foreground">
-                    {step.detail}
-                  </span>
-                </span>
-              </li>
-            )
-          })}
+          {identitySteps.map((step, index) => (
+            <IdentityStepRow
+              key={step.label}
+              step={step}
+              connected={index < identitySteps.length - 1}
+            />
+          ))}
         </ol>
 
         <Separator className="my-2" />
@@ -461,7 +479,7 @@ function ContextRail({ session }: { session: SessionInfo }) {
       <div className="border-t px-5 py-4">
         <div className="flex items-center justify-between">
           <ConnectionStatus />
-          <ShieldCheck className="size-4 text-primary" aria-label="Secure path" />
+          <ShieldCheck className="size-4 text-success" aria-label="Secure path" />
         </div>
       </div>
     </aside>
@@ -488,7 +506,7 @@ function TranscriptMessage({ message }: { message: ChatMessage }) {
                 ? "bg-primary text-primary-foreground"
                 : isError
                   ? "bg-destructive/10 text-destructive"
-                  : "bg-[var(--protocol-soft)] text-[var(--protocol)]"
+                  : "bg-protocol-soft text-protocol"
             )}
           >
             {isUser ? <UserRound className="size-4" /> : <Bot className="size-4" />}
@@ -502,11 +520,10 @@ function TranscriptMessage({ message }: { message: ChatMessage }) {
         {tools.map((tool) => (
           <Tool
             key={tool.id}
-            defaultOpen={tool.state !== "completed" || tool.name === "who_am_i"}
             className={cn(
               tool.name === "who_am_i" &&
                 tool.state === "completed" &&
-                "border-primary/35 bg-primary/[0.03] transition-colors duration-200"
+                "border-success/40 bg-success-soft transition-colors duration-200"
             )}
           >
             <ToolHeader
@@ -553,7 +570,7 @@ function PendingMessage() {
     <Message>
       <MessageAvatar>
         <Avatar className="size-8">
-          <AvatarFallback className="bg-[var(--protocol-soft)] text-[var(--protocol)]">
+          <AvatarFallback className="bg-protocol-soft text-protocol">
             <Bot className="size-4" />
           </AvatarFallback>
         </Avatar>
@@ -586,7 +603,7 @@ function EmptyConversation({
   return (
     <div className="flex min-h-full min-w-0 flex-1 items-center overflow-hidden">
       <div className="mx-auto w-full min-w-0 max-w-2xl px-5 py-10 md:px-8">
-        <div className="mb-6 flex size-10 items-center justify-center rounded-lg border bg-background text-primary">
+        <div className="mb-6 flex size-10 items-center justify-center rounded-lg border bg-card text-protocol shadow-[var(--shadow-raised)]">
           <Network className="size-5" />
         </div>
         <h1 className="text-xl font-semibold tracking-tight text-balance">
@@ -664,7 +681,7 @@ function PromptComposer({
           >
             Ask the Order Agent
           </label>
-          <InputGroup className="min-h-24 rounded-xl bg-background shadow-[0_-1px_18px_oklch(0.18_0.018_250/0.05)] has-disabled:opacity-100">
+          <InputGroup className="min-h-24 rounded-xl border-input bg-card shadow-[var(--shadow-raised)] has-disabled:opacity-100">
             <InputGroupTextarea
               ref={inputRef}
               id="order-agent-prompt"
@@ -770,8 +787,8 @@ function SignedOut({
   onTheme: () => void
 }) {
   return (
-    <div className="min-h-dvh bg-background">
-      <header className="mx-auto flex h-16 max-w-6xl items-center justify-between border-b px-5 md:px-8">
+    <div className="flex min-h-dvh flex-col bg-background">
+      <header className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between border-b px-5 md:px-8">
         <div className="flex items-center gap-3">
           <BrandMark />
           <div>
@@ -782,7 +799,7 @@ function SignedOut({
         <ThemeToggle theme={theme} onToggle={onTheme} />
       </header>
 
-      <main className="mx-auto grid max-w-6xl gap-12 px-5 py-14 md:px-8 min-[56rem]:grid-cols-[minmax(0,1fr)_minmax(20rem,25rem)] min-[56rem]:items-center min-[56rem]:gap-10 lg:py-24">
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col justify-center gap-12 px-5 py-14 md:px-8 min-[56rem]:grid min-[56rem]:grid-cols-[minmax(0,1fr)_minmax(20rem,25rem)] min-[56rem]:items-center min-[56rem]:gap-10">
         <section>
           <Badge variant="outline" className="mb-5">
             Live delegated identity demo
@@ -808,7 +825,7 @@ function SignedOut({
         </section>
 
         <section
-          className="rounded-xl border bg-[var(--workbench)] p-6"
+          className="rounded-xl border bg-workbench p-6 shadow-[var(--shadow-raised)]"
           aria-labelledby="identity-path-heading"
         >
           <div className="flex items-center justify-between gap-4">
@@ -824,25 +841,9 @@ function SignedOut({
           </div>
           <Separator className="my-5" />
           <ol className="space-y-4">
-            {identitySteps.map((step, index) => {
-              const Icon = step.icon
-              return (
-                <li key={step.label} className="flex items-center gap-3">
-                  <span className="flex size-8 items-center justify-center rounded-md border bg-background text-[var(--protocol)]">
-                    <Icon className="size-4" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium">{step.label}</span>
-                    <span className="block text-xs text-muted-foreground">
-                      {step.detail}
-                    </span>
-                  </span>
-                  <span className="text-xs tabular-nums text-muted-foreground">
-                    0{index + 1}
-                  </span>
-                </li>
-              )
-            })}
+            {identitySteps.map((step) => (
+              <IdentityStepRow key={step.label} step={step} />
+            ))}
           </ol>
         </section>
       </main>

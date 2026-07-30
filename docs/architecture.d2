@@ -1,0 +1,157 @@
+# Deployment topology for the delegated MCP OBO accelerator.
+# Render: d2 docs/architecture.d2 docs/architecture.svg
+# Colours mirror DESIGN.md — green edges carry a user identity, blue edges do not.
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    pad: 20
+  }
+}
+
+direction: right
+
+classes: {
+  identity: {
+    style: {
+      fill: "#DBF2E0"
+      stroke: "#006731"
+      stroke-width: 2
+      font-color: "#0B1219"
+      border-radius: 8
+    }
+  }
+  protocol: {
+    style: {
+      fill: "#D9EAFA"
+      stroke: "#0068B2"
+      stroke-width: 2
+      font-color: "#0B1219"
+      border-radius: 8
+    }
+  }
+  workload: {
+    style: {
+      fill: "#FFFFFF"
+      stroke: "#075726"
+      stroke-width: 2
+      font-color: "#0B1219"
+      border-radius: 8
+    }
+  }
+  plain: {
+    style: {
+      fill: "#FFFFFF"
+      stroke: "#B0B8C1"
+      font-color: "#0B1219"
+      border-radius: 8
+    }
+  }
+  group: {
+    style: {
+      fill: "#EFF2F6"
+      stroke: "#B0B8C1"
+      font-color: "#4A545D"
+      border-radius: 10
+    }
+  }
+  ns: {
+    style: {
+      fill: "#E7EBEF"
+      stroke: "#B0B8C1"
+      font-color: "#4A545D"
+      border-radius: 10
+      stroke-dash: 3
+    }
+  }
+}
+
+user: {
+  label: "Signed-in user"
+  shape: person
+  class: identity
+}
+
+aks: {
+  label: "AKS  ·  OIDC issuer  ·  Workload Identity"
+  class: group
+
+  ingress: {
+    label: "ingress-nginx\nTLS via cert-manager"
+    class: plain
+  }
+
+  orders: {
+    label: "namespace: orders"
+    label.near: top-left
+    class: ns
+
+    chat: {
+      label: "order-agent-chat\nAgent Framework + React\nfederated to chat app"
+      class: workload
+    }
+    mcp: {
+      label: "fastmcp-orders\nMCP resource server\nfederated to server app"
+      class: workload
+    }
+  }
+}
+
+foundry: {
+  label: "Microsoft Foundry\ngpt-5.6-terra"
+  class: protocol
+}
+
+entra: {
+  label: "Microsoft Entra ID"
+  class: group
+
+  chatapp: {
+    label: "Chat app registration"
+    class: identity
+  }
+  serverapp: {
+    label: "Server app registration\nMcp.Tools.ReadWrite"
+    class: identity
+  }
+}
+
+graph: {
+  label: "Microsoft Graph\nGET /me"
+  class: identity
+}
+
+user -> aks.ingress: "HTTPS" {
+  style.stroke: "#0068B2"
+  style.stroke-width: 2
+}
+aks.ingress -> aks.orders.chat: "/" {
+  style.stroke: "#0068B2"
+  style.stroke-width: 2
+}
+aks.ingress -> aks.orders.mcp: "/mcp" {
+  style.stroke: "#0068B2"
+  style.stroke-width: 2
+}
+
+aks.orders.chat -> entra.chatapp: "1 · auth code\n+ PKCE" {
+  style.stroke: "#006731"
+  style.stroke-width: 2
+}
+aks.orders.chat -> foundry: "2 · inference" {
+  style.stroke: "#0068B2"
+  style.stroke-width: 2
+}
+aks.orders.chat -> aks.orders.mcp: "3 · user's delegated\ntoken as Bearer" {
+  style.stroke: "#006731"
+  style.stroke-width: 3
+  style.bold: true
+}
+aks.orders.mcp -> entra.serverapp: "4 · OBO exchange" {
+  style.stroke: "#006731"
+  style.stroke-width: 2
+}
+aks.orders.mcp -> graph: "5 · GET /me" {
+  style.stroke: "#006731"
+  style.stroke-width: 2
+}

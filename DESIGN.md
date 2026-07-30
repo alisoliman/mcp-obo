@@ -2,22 +2,34 @@
 name: Order Agent
 description: A precise identity workbench for demonstrating delegated MCP OBO.
 colors:
-  background: "oklch(1 0 0)"
-  surface: "oklch(0.972 0.004 250)"
-  surface-strong: "oklch(0.94 0.008 250)"
+  background: "oklch(0.961 0.006 250)"
+  card: "oklch(1 0 0)"
+  surface: "oklch(0.938 0.007 250)"
+  surface-strong: "oklch(0.932 0.008 250)"
   ink: "oklch(0.18 0.018 250)"
-  muted: "oklch(0.45 0.02 250)"
-  border: "oklch(0.88 0.01 250)"
+  muted: "oklch(0.44 0.02 250)"
+  border: "oklch(0.78 0.016 250)"
+  control-border: "oklch(0.63 0.024 250)"
   primary: "oklch(0.40 0.106 150)"
   primary-hover: "oklch(0.34 0.102 150)"
-  accent: "oklch(0.54 0.14 245)"
-  success: "oklch(0.47 0.11 150)"
+  protocol: "oklch(0.50 0.15 245)"
+  protocol-soft: "oklch(0.93 0.028 245)"
+  success: "oklch(0.45 0.12 152)"
+  success-soft: "oklch(0.94 0.035 152)"
   danger: "oklch(0.48 0.17 25)"
-  dark-background: "oklch(0.11 0 0)"
-  dark-surface: "oklch(0.16 0.008 250)"
-  dark-ink: "oklch(0.95 0.006 250)"
-  dark-primary: "oklch(0.43 0.11 150)"
-  dark-muted: "oklch(0.80 0.014 250)"
+  dark-background: "oklch(0.108 0.008 255)"
+  dark-card: "oklch(0.186 0.010 255)"
+  dark-surface: "oklch(0.158 0.009 255)"
+  dark-ink: "oklch(0.96 0.005 255)"
+  dark-muted: "oklch(0.78 0.015 255)"
+  dark-border: "oklch(0.386 0.016 255)"
+  dark-control-border: "oklch(0.502 0.022 255)"
+  dark-primary: "oklch(0.75 0.17 152)"
+  dark-primary-hover: "oklch(0.82 0.16 152)"
+  dark-protocol: "oklch(0.74 0.13 245)"
+  dark-protocol-soft: "oklch(0.26 0.045 245)"
+  dark-success: "oklch(0.78 0.15 152)"
+  dark-success-soft: "oklch(0.25 0.055 152)"
 typography:
   headline:
     fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
@@ -103,32 +115,65 @@ identity state only when they help someone understand the demonstration.
 
 ## Colors
 
-Pure neutral surfaces keep the technical content crisp. Deep cultivated green
-marks primary actions and verified identity state; steel blue identifies model
-and protocol context.
+Cool tinted neutrals keep the technical content crisp. Deep cultivated green
+marks primary actions; a dedicated success green marks verified identity state;
+steel blue identifies model and protocol context.
+
+Every value below is shipped in `frontend/src/index.css`. That file is the
+source of truth; this document mirrors it. `--protocol` is the semantic root —
+`--accent` and `--ring` alias it rather than duplicating the value, so a fork
+cannot drift them apart.
 
 ### Primary
 
-- **Verified Moss** (`oklch(0.40 0.106 150)`): sign-in, send, active identity,
-  and successful secure-path emphasis.
-- **Moss Pressed** (`oklch(0.34 0.102 150)`): primary hover and active state.
+- **Verified Moss** (`oklch(0.40 0.106 150)`): sign-in, send, primary actions.
+- **Moss Pressed** (`oklch(0.34 0.102 150)`): primary hover and active state,
+  shipped as `--primary-hover`. Hover darkens with a solid token, never opacity.
+- Dark theme inverts the relationship: a bright mint (`oklch(0.75 0.17 152)`)
+  with near-black label, because a dark-on-dark fill cannot separate from the
+  canvas.
 
-### Secondary
+### Signal
 
-- **Protocol Blue** (`oklch(0.54 0.14 245)`): Foundry, model, MCP, links, and
-  focus-visible accents.
+- **Protocol Blue** (`oklch(0.50 0.15 245)`): Foundry, model, MCP, links, focus.
+- **Proof Green** (`oklch(0.45 0.12 152)`): verified identity, completed tool
+  calls, live-session dots. Distinct from primary so "do this" and "this is
+  proven" never share a treatment.
 
 ### Neutral
 
-- **Pure Canvas** (`oklch(1 0 0)`): page and message reading surface.
-- **Cool Instrument** (`oklch(0.972 0.004 250)`): rail, controls, and quiet
-  system context.
+- **Cool Canvas** (`oklch(0.961 0.006 250)`): the page beneath everything.
+- **Pure Card** (`oklch(1 0 0)`): raised reading and tool surfaces.
+- **Cool Instrument** (`oklch(0.938 0.007 250)`): rail and workbench panel.
 - **Graphite Ink** (`oklch(0.18 0.018 250)`): primary text.
-- **Slate Note** (`oklch(0.45 0.02 250)`): supporting text at AA contrast.
-- **Fine Rule** (`oklch(0.88 0.01 250)`): separators and control borders.
+- **Slate Note** (`oklch(0.44 0.02 250)`): supporting text at AA contrast.
+- **Fine Rule** (`oklch(0.78 0.016 250)`): separators and container borders.
+- **Control Rule** (`oklch(0.63 0.024 250)`): borders of interactive controls,
+  held at 3:1 for WCAG 1.4.11.
 
 **The Ten Percent Rule.** Green and blue together occupy less than ten percent
 of a screen. Their rarity communicates state instead of decoration.
+
+## Elevation
+
+Depth comes from a measured tonal ramp, reinforced by a one-pixel border and a
+small ambient shadow. Canvas sits lowest, the rail and workbench panel sit just
+above it, and cards sit highest.
+
+The ramp is not decorative — each adjacent pair is held above a contrast floor
+so structure stays legible in bright ambient light and on projectors:
+
+| Pair | Light | Dark | Floor |
+|---|---|---|---|
+| card vs canvas | 1.12:1 | 1.10:1 | 1.10 |
+| rail vs canvas | 1.07:1 | 1.05:1 | 1.05 |
+| border vs card | 2.00:1 | 1.91:1 | 1.90 |
+| control border vs card | 3.49:1 | 3.13:1 | 3.00 |
+| body text vs card | 18.79:1 | 16.56:1 | 4.50 |
+| muted text vs card | 7.75:1 | 9.30:1 | 4.50 |
+
+**The Measured Depth Rule.** A surface may only be called elevated if it is
+measurably separable from the surface beneath it. Borders alone are not depth.
 
 ## Typography
 
@@ -151,13 +196,13 @@ not belong in this product.
 **The Plain Language Rule.** Labels name the actual system part or action.
 Avoid vague AI words such as "magic", "intelligence", and "thinking".
 
-## Elevation
+## Elevation Details
 
-The design is flat by default. Depth comes from tonal layers and one-pixel
-borders. The sticky prompt uses a small ambient shadow only to distinguish it
-from scrolling content; menus may use the standard shadcn overlay shadow.
+The sticky prompt and cards use `--shadow-raised`; menus and the scroll-to-end
+control use `--shadow-overlay`. Both are tokens, never inline values.
 
-**The State-Only Shadow Rule.** Resting content never floats for decoration.
+**The State-Only Shadow Rule.** Shadow reinforces the tonal ramp; it never
+substitutes for it, and resting content never floats for decoration.
 
 ## Components
 
@@ -171,16 +216,17 @@ from scrolling content; menus may use the standard shadcn overlay shadow.
 
 ### Chips
 
-- **Style:** one-pixel border, Cool Instrument background, Slate Note text.
+- **Style:** one-pixel border on the card surface, Slate Note text, no filled
+  pill. Status chips pair a state icon with plain text.
 - **State:** suggestion chips are keyboard buttons, not decorative tags.
-  Connected status uses a small green dot and text rather than a filled pill.
+  Connected status uses a small Proof Green dot and text.
 
 ### Cards / Containers
 
-- **Corner Style:** large radius (`0.875rem`) only for the prompt and signed-out
-  explanation panel.
-- **Background:** Pure Canvas or Cool Instrument.
-- **Shadow Strategy:** flat at rest.
+- **Corner Style:** large radius (`0.875rem`) for the prompt and signed-out
+  workbench panel; medium radius for tool cards.
+- **Background:** Pure Card for raised content, Cool Instrument for the rail.
+- **Shadow Strategy:** `--shadow-raised`, supporting the tonal ramp.
 - **Border:** Fine Rule, one pixel.
 - **Internal Padding:** 1rem to 1.5rem.
 
@@ -202,10 +248,12 @@ desktop breakpoint.
 Use shadcn `MessageScroller`, `Message`, and `Bubble` primitives. User messages
 align right with a quiet primary tint. Agent messages align left on the reading
 surface. Streamed MCP calls use collapsible shadcn tool cards with explicit
-Running, Completed, and Error states; the safe identity-proof card opens by
-default. The pending state is a labeled skeleton row. New content is announced
-through a polite live region and the scroller follows only when the user is at
-the bottom.
+Running, Completed, and Error states. Tool cards are **collapsed by default** and
+expand on click with a 200ms height transition; the identity-proof card is
+marked with a Proof Green border and tint rather than being force-opened, so the
+transcript stays scannable. The pending state is a labeled skeleton row. New
+content is announced through a polite live region and the scroller follows only
+when the user is at the bottom.
 
 ## Do's and Don'ts
 
@@ -222,6 +270,10 @@ the bottom.
 
 - Recreate ChatGPT's centered blank-screen composition.
 - Use gradients, glow, glass, sparkles, or animated thinking theatrics.
+- Number an already-ordered list. Sequence markers like `01 / 02 / 03` decorate
+  rather than inform when the list order already carries the sequence.
+- Rely on a single one-pixel border to carry elevation.
+- Express hover as an opacity shift on a filled control; use a solid token.
 - Fill the page with architecture cards or production-health metrics.
 - Hide failures behind a generic assistant message.
 - Put tokens, raw claims, or sensitive identity details in the browser.

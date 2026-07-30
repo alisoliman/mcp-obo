@@ -18,6 +18,20 @@ param nodeVmSize string = 'Standard_B2s'
 @description('Capacity in thousands of tokens per minute for gpt-5.6-terra.')
 param modelCapacity int = 100
 
+@description('''Deploy the Azure Databricks workspace and request the delegated
+Databricks permission. Set to false for the Graph-only accelerator: the MCP
+server then registers no Databricks tools, because DATABRICKS_HOST is never
+produced.''')
+param deployDatabricks bool = true
+
+@description('''Optional app id allowed to request the MCP scope, for automated
+verification only. Empty (the default) means the chat client is the only
+pre-authorized caller. Set it to the Azure CLI app id
+04b07795-8ddb-461a-bbee-02f9e1bf7b46 to let `test_databricks_e2e.py` mint a
+delegated token with `az account get-access-token`. Nothing in the running
+system needs this.''')
+param harnessClientAppId string = ''
+
 var suffix = uniqueString(subscription().id, resourceGroup().id, environmentName)
 var aksName = take('aks-${environmentName}-${suffix}', 63)
 var acrName = 'acr${suffix}'
@@ -38,6 +52,20 @@ var graphAppId = '00000003-0000-0000-c000-000000000000'
 var graphUserReadScopeId = 'e1fe6dd8-ba31-4d61-89e7-88639da4683d'
 var modelName = 'gpt-5.6-terra'
 var modelVersion = '2026-07-09'
+// The Azure Databricks resource application. Unlike Graph, this app id is the
+// same in every tenant, and `user_impersonation` is its only delegated scope —
+// the one the OBO exchange asks for on the caller's behalf.
+var databricksAppId = '2ff814a6-3304-4ab8-85cb-cd0e6f879c1d'
+var databricksUserImpersonationScopeId = '739272be-e143-11e8-9f32-f2801f1b9fd1'
+var databricksWorkspaceName = take('dbw-${environmentName}-${suffix}', 30)
+var databricksManagedRgName = 'rg-${databricksWorkspaceName}-managed'
+// Catalog names must be unique inside a metastore, and a metastore is shared by
+// every workspace in a region. Suffixing keeps two deployments from colliding.
+// The bootstrap falls back to the catalog Azure provisions with the workspace
+// when the metastore has no storage root, and reports which one it used.
+var databricksCatalogName = toLower('mcp_obo_${suffix}')
+var databricksSchemaName = 'sales'
+var databricksWarehouseName = take('wh-${environmentName}-${suffix}', 64)
 var acrPullRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '7f951dda-4ed3-4680-a7ca-43fe172d538d'
@@ -211,6 +239,41 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-
   }
 }
 
+// There is deliberately no storage account or Access Connector here. Azure
+// auto-provisions a Unity Catalog metastore with each new workspace and holds
+// the catalog storage behind Databricks Default Storage, so the demo catalog
+// needs neither. Customers who must own the storage add an ADLS Gen2 account,
+// an Access Connector, and a Unity Catalog storage credential — see the
+// customer-managed storage note in the README, which records the two role
+// assignments Databricks requires for that path.
+//
+// Premium is not optional: Unity Catalog, table ACLs, row filters, and column
+// masks are all premium-tier features, and the whole point of this workload is
+// that Databricks enforces them instead of the MCP server.
+//
+// Pinned to 2024-05-01 rather than 2026-01-01 on purpose. The newer version
+// marks `computeMode` required, and that property decides whether the workspace
+// is serverless-only — not something to set blind for a reference deployment.
+resource databricks 'Microsoft.Databricks/workspaces@2024-05-01' = if (deployDatabricks) {
+  name: databricksWorkspaceName
+  location: location
+  sku: {
+    name: 'premium'
+  }
+  properties: {
+    managedResourceGroupId: subscriptionResourceId(
+      'Microsoft.Resources/resourceGroups',
+      databricksManagedRgName
+    )
+    publicNetworkAccess: 'Enabled'
+    parameters: {
+      enableNoPublicIp: {
+        value: true
+      }
+    }
+  }
+}
+
 resource clientApp 'Microsoft.Graph/applications@v1.0' = {
   uniqueName: clientAppUniqueName
   displayName: '${environmentName} Order Agent Chat'
@@ -249,27 +312,58 @@ resource serverApp 'Microsoft.Graph/applications@v1.0' = {
         isEnabled: true
       }
     ]
-    preAuthorizedApplications: [
-      {
-        appId: clientApp.appId
-        delegatedPermissionIds: [
-          scopeId
-        ]
-      }
-    ]
+    preAuthorizedApplications: concat(
+      [
+        {
+          appId: clientApp.appId
+          delegatedPermissionIds: [
+            scopeId
+          ]
+        }
+      ],
+      empty(harnessClientAppId)
+        ? []
+        : [
+            {
+              appId: harnessClientAppId
+              delegatedPermissionIds: [
+                scopeId
+              ]
+            }
+          ]
+    )
     requestedAccessTokenVersion: 2
   }
-  requiredResourceAccess: [
-    {
-      resourceAppId: graphAppId
-      resourceAccess: [
-        {
-          id: graphUserReadScopeId
-          type: 'Scope'
-        }
-      ]
-    }
-  ]
+  requiredResourceAccess: concat(
+    [
+      {
+        resourceAppId: graphAppId
+        resourceAccess: [
+          {
+            id: graphUserReadScopeId
+            type: 'Scope'
+          }
+        ]
+      }
+    ],
+    // Delegated only. There is deliberately no application permission here, so
+    // this server cannot reach Databricks except while holding a caller's
+    // token — the same property the Graph permission above gives it. A test
+    // compiles this template and asserts every entry is a 'Scope'.
+    !deployDatabricks
+      ? []
+      : [
+          {
+            resourceAppId: databricksAppId
+            resourceAccess: [
+              {
+                id: databricksUserImpersonationScopeId
+                type: 'Scope'
+              }
+            ]
+          }
+        ]
+  )
 }
 
 resource serverAppUpdate 'Microsoft.Graph/applications@v1.0' = {
@@ -322,6 +416,17 @@ resource graphAdminConsent 'Microsoft.Graph/oauth2PermissionGrants@v1.0' = {
   consentType: 'AllPrincipals'
   resourceId: graphServicePrincipal.id
   scope: 'User.Read'
+}
+
+resource databricksServicePrincipal 'Microsoft.Graph/servicePrincipals@v1.0' existing = if (deployDatabricks) {
+  appId: databricksAppId
+}
+
+resource databricksAdminConsent 'Microsoft.Graph/oauth2PermissionGrants@v1.0' = if (deployDatabricks) {
+  clientId: serverServicePrincipal.id
+  consentType: 'AllPrincipals'
+  resourceId: databricksServicePrincipal!.id
+  scope: 'user_impersonation'
 }
 
 resource mcpAdminConsent 'Microsoft.Graph/oauth2PermissionGrants@v1.0' = {
@@ -388,3 +493,18 @@ output INGRESS_IP string = ingressPublicIp.properties.ipAddress
 output INGRESS_PUBLIC_IP_RESOURCE_GROUP string = resourceGroup().name
 output FOUNDRY_PROJECT_ENDPOINT string = foundryProject.properties.endpoints['AI Foundry API']
 output FOUNDRY_MODEL_DEPLOYMENT_NAME string = modelDeployment.name
+// Empty when deployDatabricks is false, which is exactly what makes the MCP
+// server skip registering the Databricks tools.
+output DATABRICKS_HOST string = deployDatabricks
+  ? 'https://${databricks!.properties.workspaceUrl}'
+  : ''
+output DATABRICKS_WORKSPACE_NAME string = deployDatabricks ? databricks!.name : ''
+output DATABRICKS_WORKSPACE_RESOURCE_ID string = deployDatabricks ? databricks!.id : ''
+output DATABRICKS_WORKSPACE_NUMERIC_ID string = deployDatabricks
+  ? databricks!.properties.workspaceId
+  : ''
+// The preferred catalog name. The bootstrap writes back the one it actually
+// used, which differs when it falls back to the workspace's managed catalog.
+output DATABRICKS_CATALOG string = deployDatabricks ? databricksCatalogName : ''
+output DATABRICKS_SCHEMA string = deployDatabricks ? databricksSchemaName : ''
+output DATABRICKS_WAREHOUSE_NAME string = deployDatabricks ? databricksWarehouseName : ''

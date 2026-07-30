@@ -1,0 +1,128 @@
+# The delegated on-behalf-of token flow, one message at a time.
+# Render: d2 docs/token-flow.d2 docs/token-flow.svg
+
+vars: {
+  d2-config: {
+    pad: 20
+  }
+}
+
+shape: sequence_diagram
+
+user: {
+  label: "User"
+  shape: person
+  style: {
+    fill: "#DBF2E0"
+    stroke: "#006731"
+    stroke-width: 2
+  }
+}
+chat: {
+  label: "order-agent-chat\nconfidential client"
+  style: {
+    fill: "#FFFFFF"
+    stroke: "#075726"
+    stroke-width: 2
+  }
+}
+entra: {
+  label: "Microsoft\nEntra ID"
+  style: {
+    fill: "#D9EAFA"
+    stroke: "#0068B2"
+    stroke-width: 2
+  }
+}
+foundry: {
+  label: "Foundry\ngpt-5.6-terra"
+  style: {
+    fill: "#D9EAFA"
+    stroke: "#0068B2"
+    stroke-width: 2
+  }
+}
+mcp: {
+  label: "fastmcp-orders\nresource server"
+  style: {
+    fill: "#FFFFFF"
+    stroke: "#075726"
+    stroke-width: 2
+  }
+}
+graph: {
+  label: "Microsoft\nGraph"
+  style: {
+    fill: "#D9EAFA"
+    stroke: "#0068B2"
+    stroke-width: 2
+  }
+}
+
+signin: {
+  label: "Sign in — the only step that involves a human"
+
+  user -> chat: "GET /login"
+  chat -> entra: "authorization code + PKCE\nclient assertion = AKS projected token" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  entra -> chat: "delegated access token\naud = api://<server-app>  scp = Mcp.Tools.ReadWrite" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  chat -> chat: "cache in the server-side\nMSAL cache for this session only"
+}
+
+ask: {
+  label: "Every subsequent question"
+
+  user -> chat: "\"What orders do I have?\""
+  chat -> foundry: "inference — workload identity,\nno user token leaves the pod" {
+    style.stroke: "#0068B2"
+    style.stroke-width: 2
+  }
+  foundry -> chat: "tool call: list_orders" {
+    style.stroke: "#0068B2"
+  }
+}
+
+obo: {
+  label: "The on-behalf-of exchange"
+
+  chat -> mcp: "POST /mcp\nAuthorization: Bearer <user's token>" {
+    style.stroke: "#006731"
+    style.stroke-width: 3
+    style.bold: true
+  }
+  mcp -> mcp: "verify issuer, audience,\nand the Mcp.Tools.ReadWrite scope"
+  mcp -> entra: "OBO grant\nuser_assertion + client assertion" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  entra -> mcp: "Graph token, still the user" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  mcp -> graph: "GET /me" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  graph -> mcp: "id, displayName" {
+    style.stroke: "#006731"
+  }
+  mcp -> mcp: "partition the order store\nby that Graph object id"
+}
+
+answer: {
+  label: "Back to the browser"
+
+  mcp -> chat: "orders owned by this user only" {
+    style.stroke: "#006731"
+    style.stroke-width: 2
+  }
+  chat -> user: "streamed answer + sanitized tool card\nno token ever reaches the browser" {
+    style.stroke: "#0068B2"
+    style.stroke-width: 2
+  }
+}

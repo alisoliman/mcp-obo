@@ -1,3 +1,25 @@
+"""FastMCP order server: the protected resource in the delegated OBO flow.
+
+Two identity steps happen before any tool body runs:
+
+1. `AzureJWTVerifier` validates the incoming bearer token against this app's
+   own audience, the tenant issuer, and the `Mcp.Tools.ReadWrite` scope. A
+   token minted for a different resource is rejected.
+2. `current_user()` performs the on-behalf-of exchange with Microsoft Entra ID,
+   using the projected AKS Workload Identity token as this server's credential,
+   and calls Graph `/me`. The Graph object ID it returns is the only key the
+   order store is partitioned by.
+
+There is no application-permission path to order data: without a caller there
+is nothing to exchange, and Graph `/me` has no meaning outside user context.
+
+The same caller token also reaches a second downstream resource. When
+`DATABRICKS_HOST` is set, `src/databricks.py` registers tools that exchange it
+for an Azure Databricks token instead of a Graph one and let Unity Catalog do
+the row-level authorization this module does by hand. One delegated token, two
+resources, one exchange -- see `src/obo.py`.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -9,12 +31,14 @@ from pathlib import Path
 from typing import Annotated
 
 import httpx
-from azure.identity.aio import OnBehalfOfCredential
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, RemoteAuthProvider
 from fastmcp.server.auth.providers.azure import AzureJWTVerifier
 from fastmcp.server.dependencies import CurrentAccessToken
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, StringConstraints
+
+from src import databricks as databricks_tools
+from src.obo import GRAPH_SCOPE, OboExchange
 
 Sku = Annotated[
     str,
@@ -174,31 +198,39 @@ def create_server() -> FastMCP:
     )
 
     def workload_assertion() -> str:
+        # AKS Workload Identity projects a short-lived signed token for this
+        # pod's service account. It takes the place of a client secret, which
+        # is why no credential is stored anywhere in this deployment.
         assertion = token_file.read_text(encoding="utf-8").strip()
         if not assertion:
             raise RuntimeError("The projected workload identity token is empty")
         return assertion
 
+    exchange = OboExchange(
+        tenant_id=tenant_id,
+        client_id=client_id,
+        assertion=workload_assertion,
+    )
+
     async def current_user(access_token: AccessToken) -> GraphUser:
-        # ponytail: exchange per call; cache by assertion only if demo traffic warrants it.
-        credential = OnBehalfOfCredential(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            client_assertion_func=workload_assertion,
-            user_assertion=access_token.token,
-        )
-        try:
-            graph_token = await credential.get_token(
-                "https://graph.microsoft.com/.default"
-            )
-        finally:
-            await credential.close()
+        # FastMCP ships an EntraOBOToken dependency, but it only resolves when
+        # the server's auth provider is, or wraps, an AzureProvider — FastMCP's
+        # OAuth proxy, which mounts /authorize, /token, dynamic client
+        # registration and a consent screen. This server is purely a resource
+        # server sitting behind a pre-registered confidential client, so it
+        # needs none of that, and a secretless AzureProvider still demands a
+        # jwt_signing_key. Running the exchange here keeps the deployment at
+        # one route and no secrets.
+        #
+        # Every tool goes through here, so no tool can read data for anyone but
+        # the caller.
+        graph_token = await exchange.token(access_token.token, GRAPH_SCOPE)
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
             response = await client.get(
                 "https://graph.microsoft.com/v1.0/me",
                 params={"$select": "id,displayName,userPrincipalName"},
-                headers={"Authorization": f"Bearer {graph_token.token}"},
+                headers={"Authorization": f"Bearer {graph_token}"},
             )
             response.raise_for_status()
             return GraphUser.model_validate(response.json())
@@ -246,6 +278,14 @@ def create_server() -> FastMCP:
         """Move an owned order to its next valid status."""
         user = await current_user(access_token)
         return update_order_status_for(user.id, order_id, status)
+
+    # The optional half of the server, decided here rather than inside the
+    # module so that the conditionality is visible at one call site. Absent
+    # DATABRICKS_HOST there is no workspace and the accelerator runs exactly as
+    # it did before, with the Graph tools only.
+    databricks_settings = databricks_tools.DatabricksSettings.from_env()
+    if databricks_settings is not None:
+        databricks_tools.register(mcp, exchange, databricks_settings)
 
     return mcp
 

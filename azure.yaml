@@ -14,6 +14,23 @@ hooks:
       shell: sh
       interactive: false
       run: azd config set alpha.aks.kustomize on
+  postprovision:
+    posix:
+      shell: sh
+      interactive: false
+      run: |
+        # Bicep stops at the Databricks workspace. Metastores are account-level
+        # and catalogs, warehouses, grants, row filters and column masks are all
+        # Databricks APIs, so this one imperative step fills the gap. It is
+        # idempotent and skipped entirely when the workspace is not deployed.
+        if [ -z "$DATABRICKS_HOST" ]; then
+          echo "DATABRICKS_HOST is unset; skipping Unity Catalog bootstrap"
+          exit 0
+        fi
+        warehouse=$(uv run python -m scripts.bootstrap_databricks --print-env)
+        echo "$warehouse" | while IFS='=' read -r key value; do
+          [ -n "$key" ] && azd env set "$key" "$value"
+        done
   predeploy:
     posix:
       shell: sh
@@ -72,6 +89,10 @@ services:
           AZURE_TENANT_ID: ${AZURE_TENANT_ID}
           ENTRA_SERVER_CLIENT_ID: ${ENTRA_SERVER_CLIENT_ID}
           MCP_SERVER_URL: ${MCP_SERVER_URL}
+          DATABRICKS_HOST: ${DATABRICKS_HOST}
+          DATABRICKS_WAREHOUSE_ID: ${DATABRICKS_WAREHOUSE_ID}
+          DATABRICKS_CATALOG: ${DATABRICKS_CATALOG}
+          DATABRICKS_SCHEMA: ${DATABRICKS_SCHEMA}
 
   chat:
     project: .

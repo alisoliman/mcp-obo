@@ -26,4 +26,7 @@ COPY --from=frontend /frontend/dist ./frontend/dist
 
 USER 65532:65532
 EXPOSE 8001
-CMD ["python", "src/chat.py"]
+# Module form, not `python src/chat.py`. Running the file directly puts
+# /app/src on sys.path instead of /app, and chat.py imports its sibling as
+# `src.databricks` to share the tool-name list with the MCP server.
+CMD ["python", "-m", "src.chat"]

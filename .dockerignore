@@ -16,3 +16,8 @@
 !frontend/public/**
 !frontend/src/
 !frontend/src/**
+
+# The `*` allowlist above is not honoured by azd's remote-build packer, so the
+# two directories that would otherwise bloat the build context are denied here.
+frontend/node_modules
+frontend/dist

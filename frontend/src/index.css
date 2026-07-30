@@ -33,6 +33,11 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+  --color-primary-hover: var(--primary-hover);
+  --color-protocol: var(--protocol);
+  --color-protocol-soft: var(--protocol-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -42,8 +47,11 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Elevation ramp: canvas (background) < sidebar/workbench < card.
+   Every adjacent pair clears a measured contrast floor, so structure reads
+   without relying on a single hairline. See DESIGN.md for the measured table. */
 :root {
-  --background: oklch(1 0 0);
+  --background: oklch(0.961 0.006 250);
   --foreground: oklch(0.18 0.018 250);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.18 0.018 250);
@@ -51,60 +59,74 @@
   --popover-foreground: oklch(0.18 0.018 250);
   --primary: oklch(0.4 0.106 150);
   --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.972 0.004 250);
+  --primary-hover: oklch(0.34 0.102 150);
+  --secondary: oklch(0.932 0.008 250);
   --secondary-foreground: oklch(0.22 0.022 250);
-  --muted: oklch(0.972 0.004 250);
-  --muted-foreground: oklch(0.45 0.02 250);
-  --accent: oklch(0.94 0.025 245);
-  --accent-foreground: oklch(0.28 0.08 245);
+  --muted: oklch(0.932 0.008 250);
+  --muted-foreground: oklch(0.44 0.02 250);
   --destructive: oklch(0.48 0.17 25);
-  --border: oklch(0.88 0.01 250);
-  --input: oklch(0.84 0.012 250);
-  --ring: oklch(0.54 0.14 245);
+  --border: oklch(0.78 0.016 250);
+  --input: oklch(0.63 0.024 250);
   --radius: 0.625rem;
-  --sidebar: oklch(0.972 0.004 250);
-  --sidebar-foreground: oklch(0.18 0.018 250);
-  --sidebar-primary: oklch(0.4 0.106 150);
-  --sidebar-primary-foreground: oklch(1 0 0);
-  --sidebar-accent: oklch(0.94 0.015 250);
-  --sidebar-accent-foreground: oklch(0.22 0.022 250);
-  --sidebar-border: oklch(0.88 0.01 250);
-  --sidebar-ring: oklch(0.54 0.14 245);
-  --protocol: oklch(0.54 0.14 245);
-  --protocol-soft: oklch(0.94 0.025 245);
-  --workbench: oklch(0.972 0.004 250);
+
+  /* Semantic roles. --protocol is the source of truth; --accent and --ring
+     alias it so a fork cannot drift them apart. */
+  --protocol: oklch(0.5 0.15 245);
+  --protocol-soft: oklch(0.93 0.028 245);
+  --success: oklch(0.45 0.12 152);
+  --success-soft: oklch(0.94 0.035 152);
+  --accent: var(--protocol-soft);
+  --accent-foreground: oklch(0.28 0.08 245);
+  --ring: var(--protocol);
+
+  --sidebar: oklch(0.938 0.007 250);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: oklch(0.912 0.01 250);
+  --sidebar-accent-foreground: var(--secondary-foreground);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+  --workbench: var(--sidebar);
+
+  --shadow-raised:
+    0 1px 2px oklch(0.18 0.018 250 / 0.05), 0 2px 8px oklch(0.18 0.018 250 / 0.04);
+  --shadow-overlay:
+    0 8px 24px oklch(0.18 0.018 250 / 0.1), 0 2px 6px oklch(0.18 0.018 250 / 0.06);
 }
 
 .dark {
-  --background: oklch(0.11 0 0);
-  --foreground: oklch(0.95 0.006 250);
-  --card: oklch(0.15 0.006 250);
-  --card-foreground: oklch(0.95 0.006 250);
-  --popover: oklch(0.16 0.008 250);
-  --popover-foreground: oklch(0.95 0.006 250);
-  --primary: oklch(0.43 0.11 150);
-  --primary-foreground: oklch(0.98 0.003 150);
-  --secondary: oklch(0.18 0.008 250);
-  --secondary-foreground: oklch(0.93 0.008 250);
-  --muted: oklch(0.18 0.008 250);
-  --muted-foreground: oklch(0.8 0.014 250);
-  --accent: oklch(0.21 0.035 245);
+  --background: oklch(0.108 0.008 255);
+  --foreground: oklch(0.96 0.005 255);
+  --card: oklch(0.186 0.01 255);
+  --card-foreground: oklch(0.96 0.005 255);
+  --popover: oklch(0.186 0.01 255);
+  --popover-foreground: oklch(0.96 0.005 255);
+  --primary: oklch(0.75 0.17 152);
+  --primary-foreground: oklch(0.17 0.04 152);
+  --primary-hover: oklch(0.82 0.16 152);
+  --secondary: oklch(0.238 0.012 255);
+  --secondary-foreground: oklch(0.93 0.008 255);
+  --muted: oklch(0.238 0.012 255);
+  --muted-foreground: oklch(0.78 0.015 255);
+  --destructive: oklch(0.68 0.17 25);
+  --border: oklch(0.386 0.016 255);
+  --input: oklch(0.502 0.022 255);
+
+  --protocol: oklch(0.74 0.13 245);
+  --protocol-soft: oklch(0.26 0.045 245);
+  --success: oklch(0.78 0.15 152);
+  --success-soft: oklch(0.25 0.055 152);
+  --accent: var(--protocol-soft);
   --accent-foreground: oklch(0.9 0.025 245);
-  --destructive: oklch(0.65 0.17 25);
-  --border: oklch(0.29 0.012 250);
-  --input: oklch(0.33 0.014 250);
-  --ring: oklch(0.7 0.115 245);
-  --sidebar: oklch(0.15 0.006 250);
-  --sidebar-foreground: oklch(0.95 0.006 250);
-  --sidebar-primary: oklch(0.43 0.11 150);
-  --sidebar-primary-foreground: oklch(0.98 0.003 150);
-  --sidebar-accent: oklch(0.2 0.014 250);
-  --sidebar-accent-foreground: oklch(0.93 0.008 250);
-  --sidebar-border: oklch(0.29 0.012 250);
-  --sidebar-ring: oklch(0.7 0.115 245);
-  --protocol: oklch(0.7 0.115 245);
-  --protocol-soft: oklch(0.21 0.035 245);
-  --workbench: oklch(0.15 0.006 250);
+  --ring: var(--protocol);
+
+  --sidebar: oklch(0.158 0.009 255);
+  --sidebar-accent: oklch(0.222 0.014 255);
+  --workbench: var(--sidebar);
+
+  --shadow-raised: 0 1px 2px oklch(0 0 0 / 0.5), 0 2px 8px oklch(0 0 0 / 0.35);
+  --shadow-overlay: 0 8px 24px oklch(0 0 0 / 0.6), 0 2px 6px oklch(0 0 0 / 0.4);
 }
 
 @layer base {
@@ -137,7 +159,44 @@
   }
 
   ::selection {
-    background: oklch(0.4 0.106 150 / 20%);
+    background: color-mix(in oklch, var(--primary) 22%, transparent);
+  }
+}
+
+/* Tool cards expand on demand; the height transition is the state cue. */
+@layer components {
+  [data-slot="collapsible-content"] {
+    overflow: hidden;
+  }
+
+  [data-slot="collapsible-content"][data-state="open"] {
+    animation: collapsible-down 200ms cubic-bezier(0.25, 1, 0.5, 1);
+  }
+
+  [data-slot="collapsible-content"][data-state="closed"] {
+    animation: collapsible-up 160ms cubic-bezier(0.25, 1, 0.5, 1);
+  }
+}
+
+@keyframes collapsible-down {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes collapsible-up {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  to {
+    height: 0;
+    opacity: 0;
   }
 }
 

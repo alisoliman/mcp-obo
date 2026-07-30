@@ -1,3 +1,16 @@
+"""Order agent chat: the confidential client in the delegated OBO flow.
+
+The workload's own AKS identity is used for exactly two things — signing the
+client assertion during the authorization code flow, and authenticating to
+Microsoft Foundry for inference. It is never used to call the MCP server.
+
+Every MCP request instead carries the signed-in user's delegated token, taken
+from that user's server-side MSAL cache and set as the `Authorization` header
+on the httpx client that `MCPStreamableHTTPTool` uses. Tokens stay on the
+server; the browser only ever sees a session cookie, a CSRF token, and the
+sanitized tool events streamed back over SSE.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -37,6 +50,8 @@ from starlette.responses import (
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from src.databricks import DATABRICKS_TOOLS
+
 
 COOKIE_NAME = "order_agent_session"
 SESSION_TTL_SECONDS = 8 * 60 * 60
@@ -49,6 +64,12 @@ ORDER_TOOLS = {
     "create_order",
     "update_order_status",
 }
+# The Databricks names are imported rather than restated, so a tool renamed on
+# the server cannot silently drop out of the agent's allow-list. They are listed
+# unconditionally: the allow-list filters the tools the server actually
+# advertises, so when DATABRICKS_HOST is unset and the server registers none of
+# them, these names simply never match.
+MCP_TOOLS = ORDER_TOOLS | set(DATABRICKS_TOOLS)
 logger = logging.getLogger(__name__)
 _SENSITIVE_EVENT_KEYS = (
     "access_token",
@@ -118,7 +139,9 @@ class ChatRequest(BaseModel):
 
 
 def _safe_event_value(value: Any, *, depth: int = 0) -> Any:
-    if depth >= 5:
+    # Tool payloads nest at most list[order] -> items -> item -> leaf, so this
+    # ceiling only trips on something unexpected.
+    if depth >= 8:
         return "[truncated]"
     if isinstance(value, BaseModel):
         return _safe_event_value(value.model_dump(mode="json"), depth=depth + 1)
@@ -254,6 +277,9 @@ def _save_cache(session: BrowserSession, cache: SerializableTokenCache) -> None:
 
 
 def _cookie(response: Response, session_id: str) -> None:
+    # Entra returns the authorization code as a cross-site form POST, which a
+    # SameSite=Lax cookie would not accompany. Every state-changing route
+    # therefore checks the CSRF header instead of relying on SameSite.
     response.set_cookie(
         COOKIE_NAME,
         session_id,
@@ -305,7 +331,7 @@ def create_app(
             "model": config.foundry_model,
             "mcp": {
                 "name": "Order MCP",
-                "tools": sorted(ORDER_TOOLS),
+                "tools": sorted(MCP_TOOLS),
             },
         }
         active = current_session(request)
@@ -459,7 +485,7 @@ def create_app(
                         name="orders",
                         description="Order tools for the signed-in user.",
                         url=config.mcp_endpoint,
-                        allowed_tools=ORDER_TOOLS,
+                        allowed_tools=MCP_TOOLS,
                         approval_mode="never_require",
                         load_prompts=False,
                         http_client=mcp_http,
@@ -476,7 +502,14 @@ def create_app(
                             "Use the order tools for order facts and never invent order data. "
                             "Only create an order or change status when the user explicitly asks. "
                             "When asked to prove identity or OBO, call who_am_i and report its "
-                            "display name, identity fingerprint, and evidence exactly."
+                            "display name, identity fingerprint, and evidence exactly. "
+                            "The databricks_* tools read a Unity Catalog table over the same "
+                            "delegated identity. Use databricks_query_orders for questions about "
+                            "Databricks or warehouse data, and databricks_whoami when asked which "
+                            "identity Databricks resolved. Report their results exactly. "
+                            "Rows are filtered and columns masked by Unity Catalog before you see "
+                            "them, so never present a masked value as if it were the real one, and "
+                            "say plainly that the filtering happened in Databricks, not here."
                         ),
                         tools=[mcp],
                     )
