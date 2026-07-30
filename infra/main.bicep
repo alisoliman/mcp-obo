@@ -18,11 +18,19 @@ param nodeVmSize string = 'Standard_B2s'
 @description('Capacity in thousands of tokens per minute for gpt-5.6-terra.')
 param modelCapacity int = 100
 
-@description('''Deploy the Azure Databricks workspace and request the delegated
-Databricks permission. Set to false for the Graph-only accelerator: the MCP
-server then registers no Databricks tools, because DATABRICKS_HOST is never
-produced.''')
-param deployDatabricks bool = true
+@description('''Which example to deploy. These are alternatives, not layers.
+
+  orders      The MCP server authorizes, using Microsoft Graph to resolve the
+              caller. Start here to build your own MCP server on Azure.
+  databricks  Unity Catalog authorizes. Adds a premium Databricks workspace and
+              the delegated Databricks permission.
+
+See docs/authorization.md — the identity path is identical in both.''')
+@allowed([
+  'orders'
+  'databricks'
+])
+param deploymentMode string = 'orders'
 
 @description('''Optional app id allowed to request the MCP scope, for automated
 verification only. Empty (the default) means the chat client is the only
@@ -33,6 +41,7 @@ system needs this.''')
 param harnessClientAppId string = ''
 
 var suffix = uniqueString(subscription().id, resourceGroup().id, environmentName)
+var deployDatabricks = deploymentMode == 'databricks'
 var aksName = take('aks-${environmentName}-${suffix}', 63)
 var acrName = 'acr${suffix}'
 var foundryName = take('foundry-${environmentName}-${suffix}', 64)
@@ -493,6 +502,7 @@ output INGRESS_IP string = ingressPublicIp.properties.ipAddress
 output INGRESS_PUBLIC_IP_RESOURCE_GROUP string = resourceGroup().name
 output FOUNDRY_PROJECT_ENDPOINT string = foundryProject.properties.endpoints['AI Foundry API']
 output FOUNDRY_MODEL_DEPLOYMENT_NAME string = modelDeployment.name
+output MCP_MODE string = deploymentMode
 // Empty when deployDatabricks is false, which is exactly what makes the MCP
 // server skip registering the Databricks tools.
 output DATABRICKS_HOST string = deployDatabricks

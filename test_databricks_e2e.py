@@ -48,7 +48,13 @@ ENV = azd_env()
 MCP_ENDPOINT = ENV.get("MCP_ENDPOINT", "").strip()
 SERVER_APP_ID = ENV.get("ENTRA_SERVER_CLIENT_ID", "").strip()
 DATABRICKS_HOST = ENV.get("DATABRICKS_HOST", "").strip()
-CONFIGURED = bool(MCP_ENDPOINT and SERVER_APP_ID and DATABRICKS_HOST)
+# Databricks mode only. An orders-mode deployment serves none of these tools, so
+# the whole module skips rather than failing on tools that were never meant to
+# be there.
+MODE = (ENV.get("MCP_MODE", "orders").strip().lower() or "orders")
+CONFIGURED = bool(
+    MODE == "databricks" and MCP_ENDPOINT and SERVER_APP_ID and DATABRICKS_HOST
+)
 
 # Written back by the bootstrap, so these follow however many owners were
 # seeded rather than drifting from a constant.
@@ -135,7 +141,7 @@ async def call(tool: str, arguments: dict | None = None):
     return payload
 
 
-@unittest.skipUnless(CONFIGURED, "deployment not configured; run after `azd up`")
+@unittest.skipUnless(CONFIGURED, "not a databricks-mode deployment; run after `azd up`")
 class DelegatedIdentityReachesDatabricks(unittest.TestCase):
     """The identity survives every hop between the browser and the warehouse."""
 
@@ -197,7 +203,7 @@ class DelegatedIdentityReachesDatabricks(unittest.TestCase):
         self.assertIn("orders", names)
 
 
-@unittest.skipUnless(CONFIGURED, "deployment not configured; run after `azd up`")
+@unittest.skipUnless(CONFIGURED, "not a databricks-mode deployment; run after `azd up`")
 class NoApplicationOnlyPathExists(unittest.TestCase):
     """The negative half of the claim, checked against live Entra ID.
 

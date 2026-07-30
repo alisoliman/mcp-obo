@@ -51,25 +51,50 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from src.databricks import DATABRICKS_TOOLS
+from src.orders import ORDER_TOOLS
+from src.server import DATABRICKS_MODE, current_mode
 
 
 COOKIE_NAME = "order_agent_session"
 SESSION_TTL_SECONDS = 8 * 60 * 60
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FRONTEND_DIST = ROOT / "frontend" / "dist"
-ORDER_TOOLS = {
-    "who_am_i",
-    "list_orders",
-    "get_order",
-    "create_order",
-    "update_order_status",
-}
-# The Databricks names are imported rather than restated, so a tool renamed on
-# the server cannot silently drop out of the agent's allow-list. They are listed
-# unconditionally: the allow-list filters the tools the server actually
-# advertises, so when DATABRICKS_HOST is unset and the server registers none of
-# them, these names simply never match.
-MCP_TOOLS = ORDER_TOOLS | set(DATABRICKS_TOOLS)
+ORDERS_INSTRUCTIONS = (
+    "You help the signed-in user with their orders. "
+    "Use the order tools for order facts and never invent order data. "
+    "Only create an order or change status when the user explicitly asks. "
+    "When asked to prove identity or OBO, call who_am_i and report its "
+    "display name, identity fingerprint, and evidence exactly."
+)
+DATABRICKS_INSTRUCTIONS = (
+    "You answer questions about the signed-in user's orders, which live in a "
+    "Unity Catalog table in Azure Databricks. "
+    "Use databricks_query_orders for order data and never invent rows. "
+    "Call databricks_whoami when asked which identity Databricks resolved, and "
+    "report its results exactly. "
+    "Unity Catalog filters rows and masks columns before you see them, so never "
+    "present a masked value as if it were real, and when it comes up say plainly "
+    "that the filtering happened in Databricks rather than in this application."
+)
+
+
+def allowed_tools() -> frozenset[str]:
+    """The tool names for the mode this deployment is running.
+
+    Imported from the tool modules rather than restated, so a tool renamed on
+    the server cannot silently drop out of the agent's allow-list.
+    """
+    return DATABRICKS_TOOLS if current_mode() == DATABRICKS_MODE else ORDER_TOOLS
+
+
+def agent_instructions() -> str:
+    return (
+        DATABRICKS_INSTRUCTIONS
+        if current_mode() == DATABRICKS_MODE
+        else ORDERS_INSTRUCTIONS
+    )
+
+
 logger = logging.getLogger(__name__)
 _SENSITIVE_EVENT_KEYS = (
     "access_token",
@@ -331,7 +356,7 @@ def create_app(
             "model": config.foundry_model,
             "mcp": {
                 "name": "Order MCP",
-                "tools": sorted(MCP_TOOLS),
+                "tools": sorted(allowed_tools()),
             },
         }
         active = current_session(request)
@@ -485,7 +510,7 @@ def create_app(
                         name="orders",
                         description="Order tools for the signed-in user.",
                         url=config.mcp_endpoint,
-                        allowed_tools=MCP_TOOLS,
+                        allowed_tools=allowed_tools(),
                         approval_mode="never_require",
                         load_prompts=False,
                         http_client=mcp_http,
@@ -497,20 +522,7 @@ def create_app(
                             credential=credential,
                         ),
                         name="OrderAgent",
-                        instructions=(
-                            "You help the signed-in user with their orders. "
-                            "Use the order tools for order facts and never invent order data. "
-                            "Only create an order or change status when the user explicitly asks. "
-                            "When asked to prove identity or OBO, call who_am_i and report its "
-                            "display name, identity fingerprint, and evidence exactly. "
-                            "The databricks_* tools read a Unity Catalog table over the same "
-                            "delegated identity. Use databricks_query_orders for questions about "
-                            "Databricks or warehouse data, and databricks_whoami when asked which "
-                            "identity Databricks resolved. Report their results exactly. "
-                            "Rows are filtered and columns masked by Unity Catalog before you see "
-                            "them, so never present a masked value as if it were the real one, and "
-                            "say plainly that the filtering happened in Databricks, not here."
-                        ),
+                        instructions=agent_instructions(),
                         tools=[mcp],
                     )
                     async with agent:

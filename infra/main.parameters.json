@@ -13,6 +13,9 @@
     },
     "harnessClientAppId": {
       "value": "${HARNESS_CLIENT_APP_ID=}"
+    },
+    "deploymentMode": {
+      "value": "${MCP_MODE=orders}"
     }
   }
 }

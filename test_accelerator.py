@@ -15,12 +15,13 @@ from fastmcp.server.auth.providers.azure import AzureJWTVerifier
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 
+import src.orders as orders
 import src.server as server
 from src import databricks
 from src.databricks import DATABRICKS_TOOLS
+from src.orders import ORDER_TOOLS
 from src.chat import (
-    MCP_TOOLS,
-    ORDER_TOOLS,
+    allowed_tools,
     ChatRequest,
     Settings,
     _safe_event_value,
@@ -30,7 +31,7 @@ from src.chat import (
     create_app,
 )
 from src.obo import DATABRICKS_RESOURCE_APP_ID, DATABRICKS_SCOPE, GRAPH_SCOPE
-from src.server import (
+from src.orders import (
     GraphUser,
     OrderItem,
     OrderStatus,
@@ -48,6 +49,7 @@ MCP_ENVIRONMENT = {
     "AZURE_TENANT_ID": "11111111-1111-1111-1111-111111111111",
     "ENTRA_SERVER_CLIENT_ID": "22222222-2222-2222-2222-222222222222",
     "MCP_SERVER_URL": "https://orders.example.test",
+    "MCP_MODE": "orders",
 }
 DATABRICKS_ENVIRONMENT = {
     "DATABRICKS_HOST": "https://adb-1234567890.11.azuredatabricks.net",
@@ -59,8 +61,8 @@ DATABRICKS_ENVIRONMENT = {
 
 class OrderTests(unittest.TestCase):
     def setUp(self) -> None:
-        server._orders.clear()
-        server._order_numbers = count(1)
+        orders._orders.clear()
+        orders._order_numbers = count(1)
 
     def test_create_calculates_total_and_lists_by_owner(self) -> None:
         order = create_order_for(
@@ -188,35 +190,70 @@ class McpServerTests(unittest.TestCase):
 
 
 class DatabricksToolTests(unittest.TestCase):
-    """The Databricks half of the flow, checked without a workspace.
+    """Databricks mode, checked without a workspace.
 
-    What a unit test can prove here is narrow but worth pinning: the tools are
-    opt-in, the query is not assembled from caller input, and the Entra
-    permission is delegated rather than application. Whether Unity Catalog
-    actually filters rows is a deployment fact, checked by the end-to-end
-    harness in `test_databricks_e2e.py`.
+    What a unit test can prove here is narrow but worth pinning: the mode
+    selects the right tools, the query is not assembled from caller input, and
+    the Entra permission is delegated rather than application. Whether Unity
+    Catalog actually filters rows is a deployment fact, checked by the
+    end-to-end harness in `test_databricks_e2e.py`.
     """
 
-    def test_tools_register_only_when_the_workspace_is_configured(self) -> None:
-        environment = dict(MCP_ENVIRONMENT, **DATABRICKS_ENVIRONMENT)
+    def test_databricks_mode_replaces_the_order_tools(self) -> None:
+        environment = dict(
+            MCP_ENVIRONMENT, MCP_MODE="databricks", **DATABRICKS_ENVIRONMENT
+        )
         with patch.dict("os.environ", environment, clear=False):
             mcp = server.create_server()
             tools = asyncio.run(mcp.list_tools())
+            allowed = allowed_tools()
 
-        # The chat client passes MCP_TOOLS as `allowed_tools`. Asserting exact
-        # equality is the drift check: a tool added to the server but missing
-        # from the allow-list would never be callable from the UI, and one
-        # removed from the server would sit in the allow-list forever.
-        self.assertEqual({tool.name for tool in tools}, MCP_TOOLS)
-        self.assertEqual(MCP_TOOLS, ORDER_TOOLS | set(DATABRICKS_TOOLS))
+        # The modes are alternatives, not layers: databricks mode serves the
+        # Databricks tools and nothing else.
+        self.assertEqual({tool.name for tool in tools}, set(DATABRICKS_TOOLS))
+        self.assertEqual({tool.name for tool in tools} & set(ORDER_TOOLS), set())
+        # And the chat's allow-list follows the same mode, so a tool on the
+        # server is always reachable from the UI and vice versa.
+        self.assertEqual(allowed, DATABRICKS_TOOLS)
         for tool in tools:
             self.assertNotIn("access_token", tool.parameters.get("properties", {}))
+
+    def test_orders_mode_serves_only_the_order_tools(self) -> None:
+        # Databricks settings present but the mode says orders: the workspace
+        # config is ignored rather than quietly bolted on.
+        environment = dict(
+            MCP_ENVIRONMENT, MCP_MODE="orders", **DATABRICKS_ENVIRONMENT
+        )
+        with patch.dict("os.environ", environment, clear=False):
+            mcp = server.create_server()
+            tools = asyncio.run(mcp.list_tools())
+            allowed = allowed_tools()
+
+        self.assertEqual({tool.name for tool in tools}, set(ORDER_TOOLS))
+        self.assertEqual(allowed, ORDER_TOOLS)
+
+    def test_an_unknown_mode_fails_at_startup(self) -> None:
+        environment = dict(MCP_ENVIRONMENT, MCP_MODE="postgres")
+        with patch.dict("os.environ", environment, clear=False), self.assertRaisesRegex(
+            RuntimeError, "MCP_MODE must be one of"
+        ):
+            server.create_server()
+
+    def test_databricks_mode_without_a_workspace_fails_at_startup(self) -> None:
+        environment = dict(
+            MCP_ENVIRONMENT, MCP_MODE="databricks", DATABRICKS_HOST=""
+        )
+        with patch.dict("os.environ", environment, clear=False), self.assertRaisesRegex(
+            RuntimeError, "requires DATABRICKS_HOST"
+        ):
+            server.create_server()
 
     def test_partial_databricks_configuration_fails_at_startup(self) -> None:
         # Half-configured is worse than absent: the tools would appear in the
         # tool list and fail on first call, so startup refuses instead.
         environment = dict(
             MCP_ENVIRONMENT,
+            MCP_MODE="databricks",
             DATABRICKS_HOST=DATABRICKS_ENVIRONMENT["DATABRICKS_HOST"],
             DATABRICKS_WAREHOUSE_ID="",
             DATABRICKS_CATALOG="",
@@ -255,6 +292,7 @@ class DatabricksToolTests(unittest.TestCase):
     def test_catalog_identifiers_are_rejected_when_not_plain(self) -> None:
         environment = dict(
             MCP_ENVIRONMENT,
+            MCP_MODE="databricks",
             **{**DATABRICKS_ENVIRONMENT, "DATABRICKS_CATALOG": "cat; DROP TABLE x"},
         )
         with patch.dict("os.environ", environment, clear=False), self.assertRaisesRegex(
@@ -549,13 +587,13 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(session_payload["profile"]["name"], "Ada")
                 self.assertTrue(session_payload["historyKey"])
                 self.assertEqual(session_payload["model"], "gpt-5.6-terra")
-                # Derived from MCP_TOOLS rather than restated, so wiring a new
+                # Derived from allowed_tools() rather than restated, so wiring a new
                 # tool into the agent updates this in one place. The order
                 # tools are named explicitly as well, so the Graph half of the
                 # demo cannot quietly disappear from the UI.
                 self.assertEqual(
                     session_payload["mcp"]["tools"],
-                    sorted(MCP_TOOLS),
+                    sorted(allowed_tools()),
                 )
                 self.assertLessEqual(
                     {
@@ -608,7 +646,7 @@ class ChatTests(unittest.TestCase):
                 "model": "gpt-5.6-terra",
                 "mcp": {
                     "name": "Order MCP",
-                    "tools": sorted(MCP_TOOLS),
+                    "tools": sorted(allowed_tools()),
                 },
             },
         )

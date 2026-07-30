@@ -19,12 +19,12 @@ hooks:
       shell: sh
       interactive: false
       run: |
-        # Bicep stops at the Databricks workspace. Metastores are account-level
-        # and catalogs, warehouses, grants, row filters and column masks are all
-        # Databricks APIs, so this one imperative step fills the gap. It is
-        # idempotent and skipped entirely when the workspace is not deployed.
-        if [ -z "$DATABRICKS_HOST" ]; then
-          echo "DATABRICKS_HOST is unset; skipping Unity Catalog bootstrap"
+        # Databricks mode only. Bicep stops at the workspace: metastores are
+        # account-level, and catalogs, warehouses, grants, row filters and
+        # column masks are all Databricks APIs. This one idempotent step fills
+        # that gap, and orders mode never reaches it.
+        if [ "$MCP_MODE" != "databricks" ]; then
+          echo "MCP_MODE=$MCP_MODE; skipping the Unity Catalog bootstrap"
           exit 0
         fi
         warehouse=$(uv run python -m scripts.bootstrap_databricks --print-env)
@@ -89,6 +89,7 @@ services:
           AZURE_TENANT_ID: ${AZURE_TENANT_ID}
           ENTRA_SERVER_CLIENT_ID: ${ENTRA_SERVER_CLIENT_ID}
           MCP_SERVER_URL: ${MCP_SERVER_URL}
+          MCP_MODE: ${MCP_MODE}
           DATABRICKS_HOST: ${DATABRICKS_HOST}
           DATABRICKS_WAREHOUSE_ID: ${DATABRICKS_WAREHOUSE_ID}
           DATABRICKS_CATALOG: ${DATABRICKS_CATALOG}
@@ -120,6 +121,7 @@ services:
           - set image chat-image=${SERVICE_CHAT_IMAGE_NAME}
         env:
           AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+          MCP_MODE: ${MCP_MODE}
           ENTRA_CLIENT_CLIENT_ID: ${ENTRA_CLIENT_CLIENT_ID}
           OAUTH_REDIRECT_URI: ${OAUTH_REDIRECT_URI}
           APP_HOST: ${APP_HOST}
