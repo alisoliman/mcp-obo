@@ -54,9 +54,15 @@ ALTER TABLE orders SET ROW FILTER orders_row_filter ON (owner_email);
 ALTER TABLE orders ALTER COLUMN customer_email SET MASK mask_email;
 ```
 
+Owners are you, plus anyone in `DATABRICKS_DEMO_OWNERS`, plus one synthetic
+address nobody signs in as — so a default deployment holds six rows across two
+owners, and there is always at least one row you cannot see.
+
 The server sends `SELECT … FROM orders` with **no predicate on `owner_email`**
-and does no filtering. Three of nine rows come back, with `customer_email`
-reading `***@northwind.example`.
+and does no filtering. Exactly your three rows come back, with `customer_email`
+reading `***@northwind.example`. The bootstrap writes the real totals to
+`DATABRICKS_SEEDED_TOTAL` and `DATABRICKS_SEEDED_PER_OWNER`, and the harness
+asserts against those rather than against a number written in this file.
 
 This holds **even for the table owner and a metastore admin**. Table-level row
 filters and column masks have no owner bypass, unlike dynamic views where the
