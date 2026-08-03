@@ -37,6 +37,8 @@ from azure.identity.aio import WorkloadIdentityCredential
 from msal import ConfidentialClientApplication, SerializableTokenCache
 from pydantic import BaseModel, Field, ValidationError
 from starlette.applications import Starlette
+from starlette.datastructures import MutableHeaders
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import (
     FileResponse,
@@ -48,14 +50,35 @@ from starlette.responses import (
 )
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.databricks import DATABRICKS_TOOLS
 from src.orders import ORDER_TOOLS
 from src.server import DATABRICKS_MODE, current_mode
 
 
-COOKIE_NAME = "order_agent_session"
-SESSION_TTL_SECONDS = 8 * 60 * 60
+# The `__Host-` prefix makes the browser refuse the cookie unless it was set
+# with Secure, Path=/ and no Domain, which is the one control that survives the
+# DNS shape this accelerator ships: `cloudapp.azure.com` is not on the Public
+# Suffix List (only `cloudapp.net` is), so a sibling Azure DNS label in the same
+# region can otherwise set a Domain-scoped cookie of this name on us.
+COOKIE_NAME = "__Host-order_agent_session"
+# Idle timeout, refreshed on each request, and a hard ceiling measured from the
+# moment the user actually signed in. Without the ceiling a stolen cookie stays
+# usable for as long as MSAL can keep refreshing, which outlives whatever
+# sign-in frequency the tenant's Conditional Access policy asked for.
+SESSION_IDLE_TTL_SECONDS = 30 * 60
+SESSION_ABSOLUTE_TTL_SECONDS = 8 * 60 * 60
+# A session that /login created but Entra has not yet returned to only has to
+# survive one round trip, and it is the one an unauthenticated caller can mint.
+# Ten minutes rather than something tighter because that is how long Entra keeps
+# the authorization code alive: expiring first would fail a sign-in that is
+# still perfectly valid, which is what a user pausing on an MFA prompt looks
+# like.
+PRE_AUTH_TTL_SECONDS = 10 * 60
+# The store is per-pod and in memory, so an unauthenticated GET /login loop is
+# an allocation primitive. This is a ceiling, not capacity planning.
+MAX_SESSIONS = 2_000
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FRONTEND_DIST = ROOT / "frontend" / "dist"
 ORDERS_INSTRUCTIONS = (
@@ -95,13 +118,27 @@ def agent_instructions() -> str:
 
 
 logger = logging.getLogger(__name__)
+# A substring denylist over key names, applied to every tool result before it
+# reaches the browser. Nothing in this repo's tools can return a credential —
+# they return frozen models with no such field — so this exists for the tools an
+# adopter bolts on. Treat it as a floor: a tool that returns a secret under a
+# name nobody thought of is still a leak, and the fix is the tool, not this list.
 _SENSITIVE_EVENT_KEYS = (
-    "access_token",
+    "_key",
+    "apikey",
     "assertion",
-    "authorization",
-    "client_secret",
+    "auth",
+    "bearer",
+    "cookie",
+    "credential",
+    "jwt",
+    "passphrase",
     "password",
-    "refresh_token",
+    "private",
+    "sas",
+    "secret",
+    "session",
+    "signature",
     "token",
 )
 
@@ -151,10 +188,32 @@ class BrowserSession:
     auth_flow: dict[str, Any] | None = None
     profile: dict[str, Any] | None = None
     agent_session: AgentSession | None = None
+    # None until the authorization code has been redeemed. Both the absolute
+    # ceiling and the pre-authentication TTL key off this, so it is the flag for
+    # "this session has been through Entra" as much as it is a timestamp.
+    authenticated_at: float | None = None
     expires_at: float = field(
-        default_factory=lambda: time.time() + SESSION_TTL_SECONDS
+        default_factory=lambda: time.time() + PRE_AUTH_TTL_SECONDS
     )
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def authenticate(self, now: float) -> None:
+        self.authenticated_at = now
+        self.expires_at = now + SESSION_IDLE_TTL_SECONDS
+
+    def touch(self, now: float) -> None:
+        """Slide the idle deadline, but never past the absolute one.
+
+        A pre-authentication session is deliberately not slid: it has one job,
+        and letting an unauthenticated caller keep it alive by polling would
+        hand back the unbounded lifetime this is here to remove.
+        """
+        if self.authenticated_at is None:
+            return
+        self.expires_at = min(
+            now + SESSION_IDLE_TTL_SECONDS,
+            self.authenticated_at + SESSION_ABSOLUTE_TTL_SECONDS,
+        )
 
 
 class ChatRequest(BaseModel):
@@ -295,18 +354,90 @@ def _save_cache(session: BrowserSession, cache: SerializableTokenCache) -> None:
         session.token_cache = cache.serialize()
 
 
-def _cookie(response: Response, session_id: str) -> None:
+def _cookie(response: Response, session_id: str, *, max_age: int) -> None:
     # Entra returns the authorization code as a cross-site form POST, which a
     # SameSite=Lax cookie would not accompany. Every state-changing route checks
-    # the CSRF header instead of relying on SameSite.
+    # the CSRF header instead of relying on SameSite. Secure and Path=/ with no
+    # Domain are what the `__Host-` prefix requires; a browser that sees the
+    # prefix without them drops the cookie entirely.
     response.set_cookie(
         COOKIE_NAME,
         session_id,
-        max_age=SESSION_TTL_SECONDS,
+        max_age=max_age,
+        path="/",
         secure=True,
         httponly=True,
         samesite="none",
     )
+
+
+def _clear_cookie(response: Response) -> None:
+    # The deletion cookie has to satisfy the `__Host-` rules too, otherwise the
+    # browser rejects it and the session cookie survives the logout.
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="none",
+    )
+
+
+_SECURITY_HEADERS = {
+    # style-src has to allow inline styles: Radix's dropdown pulls in
+    # react-remove-scroll, which injects a <style> element at runtime to lock
+    # body scroll, and a static bundle has no way to carry a per-response nonce.
+    # Everything else is closed. img-src is the one that blocks the prompt
+    # injection exfiltration channel — table COMMENT text from Unity Catalog
+    # reaches the model, and a remote <img> in the model's markdown would be a
+    # silent GET carrying whatever it was told to encode.
+    #
+    # frame-ancestors is load-bearing rather than routine. The session cookie
+    # must stay SameSite=none for Entra's cross-site form POST, so it rides
+    # along inside a hostile iframe; without frame-ancestors an attacker page
+    # can frame the signed-in UI, with its CSRF token already fetched, and
+    # drive a real turn by redressing the send button.
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'none'; "
+        "form-action 'self'; "
+        "object-src 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+}
+
+
+class SecurityHeadersMiddleware:
+    """Stamps the response headers on every route, including the SSE stream.
+
+    Raw ASGI rather than BaseHTTPMiddleware on purpose: BaseHTTPMiddleware pumps
+    every body chunk through an anyio stream, which would put a queue between
+    the agent's token deltas and the browser. This only rewrites the
+    `http.response.start` message and never touches the body.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in _SECURITY_HEADERS.items():
+                    headers.setdefault(name, value)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 def create_app(
@@ -324,15 +455,30 @@ def create_app(
         )
     sessions: dict[str, BrowserSession] = {}
 
+    def store_session(session_id: str, session: BrowserSession, now: float) -> None:
+        """Insert, sweeping the expired and capping what is left.
+
+        Sweeping on insert is enough because insert is the only unauthenticated
+        path into this dict; evicting the soonest-to-expire first drops the
+        pre-authentication shells a flood creates, which carry the shortest TTL
+        of anything here, before it touches anyone who actually signed in.
+        """
+        for stale_id in [sid for sid, s in sessions.items() if s.expires_at <= now]:
+            sessions.pop(stale_id, None)
+        while len(sessions) >= MAX_SESSIONS:
+            sessions.pop(min(sessions, key=lambda sid: sessions[sid].expires_at), None)
+        sessions[session_id] = session
+
     def current_session(request: Request) -> tuple[str, BrowserSession] | None:
         session_id = request.cookies.get(COOKIE_NAME)
         if not session_id:
             return None
         session = sessions.get(session_id)
-        if session is None or session.expires_at <= time.time():
+        now = time.time()
+        if session is None or session.expires_at <= now:
             sessions.pop(session_id, None)
             return None
-        session.expires_at = time.time() + SESSION_TTL_SECONDS
+        session.touch(now)
         return session_id, session
 
     def require_csrf(request: Request, session: BrowserSession) -> bool:
@@ -379,7 +525,7 @@ def create_app(
     async def login(_: Request) -> RedirectResponse:
         session_id = secrets.token_urlsafe(32)
         session = BrowserSession()
-        sessions[session_id] = session
+        store_session(session_id, session, time.time())
         app, _ = _msal_app(config, session)
         flow = await asyncio.to_thread(
             app.initiate_auth_code_flow,
@@ -389,7 +535,7 @@ def create_app(
         )
         session.auth_flow = flow
         response = RedirectResponse(str(flow["auth_uri"]), status_code=302)
-        _cookie(response, session_id)
+        _cookie(response, session_id, max_age=PRE_AUTH_TTL_SECONDS)
         return response
 
     async def auth_callback(request: Request) -> Response:
@@ -424,8 +570,27 @@ def create_app(
             session.profile = dict(result.get("id_token_claims") or {})
             _save_cache(session, cache)
 
+            # The privilege change is here, so the identifier changes here. An
+            # id that reached this pod in a planted cookie now names nothing,
+            # and the attacker's copy cannot follow the user in. This is not
+            # theoretical for the DNS shape the README deploys:
+            # `cloudapp.azure.com` is absent from the Public Suffix List, so a
+            # sibling label in the same region can set a Domain-scoped cookie
+            # here, and SameSite=none means it rides Entra's form POST.
+            # Everything downstream — the MCP server, the OBO exchange, Unity
+            # Catalog — would correctly believe the attacker is this user,
+            # because this is the only layer that decides who asked.
+            sessions.pop(session_id, None)
+            session_id = secrets.token_urlsafe(32)
+            session.csrf_token = secrets.token_urlsafe(32)
+            now = time.time()
+            session.authenticate(now)
+            store_session(session_id, session, now)
+
         response = RedirectResponse("/", status_code=303)
-        _cookie(response, session_id)
+        # The cookie carries the absolute lifetime; the idle timeout is the
+        # server's business and is not something the browser should enforce.
+        _cookie(response, session_id, max_age=SESSION_ABSOLUTE_TTL_SECONDS)
         return response
 
     async def delegated_token(session: BrowserSession) -> str | None:
@@ -493,6 +658,15 @@ def create_app(
                         description="Order tools for the signed-in user.",
                         url=config.mcp_endpoint,
                         allowed_tools=allowed_tools(),
+                        # Deliberate for the demo, and a real limit. Answering
+                        # an approval prompt needs a browser-to-server channel
+                        # this one-way SSE stream does not have, so a gate here
+                        # would hang the turn rather than ask. The databricks
+                        # tools only read; the order tools do not, and
+                        # create_order and update_order_status run on arguments
+                        # a model chose after reading text this app does not
+                        # control. Anyone taking this past a demo has to build
+                        # that channel before trusting a mutating tool.
                         approval_mode="never_require",
                         load_prompts=False,
                         http_client=mcp_http,
@@ -607,11 +781,12 @@ def create_app(
             + urlencode({"post_logout_redirect_uri": config.app_url})
         )
         response = JSONResponse({"logoutUrl": logout_url})
-        response.delete_cookie(COOKIE_NAME)
+        _clear_cookie(response)
         return response
 
     return Starlette(
         debug=False,
+        middleware=[Middleware(SecurityHeadersMiddleware)],
         routes=[
             Route("/", index),
             Route("/favicon.svg", favicon),

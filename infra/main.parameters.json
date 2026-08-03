@@ -16,6 +16,12 @@
     },
     "deploymentMode": {
       "value": "${MCP_MODE=orders}"
+    },
+    "allowedPrincipalIds": {
+      "value": "${ALLOWED_PRINCIPAL_IDS=}"
+    },
+    "enableDatabricksAuditLogs": {
+      "value": "${ENABLE_DATABRICKS_AUDIT_LOGS=false}"
     }
   }
 }

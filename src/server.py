@@ -22,11 +22,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.azure import AzureJWTVerifier
 from pydantic import AnyHttpUrl
+from starlette.datastructures import Headers
+from starlette.middleware import Middleware
+from starlette.responses import PlainTextResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src import databricks as databricks_tools
 from src import orders as order_tools
@@ -36,10 +41,70 @@ ORDERS_MODE = "orders"
 DATABRICKS_MODE = "databricks"
 MODES = (ORDERS_MODE, DATABRICKS_MODE)
 
+# Pinned rather than left to the fastmcp default, because infra/main.bicep
+# publishes `MCP_ENDPOINT` as this exact path.
+MCP_PATH = "/mcp"
+
+# The RFC 9728 discovery documents are read before a client has a token, from
+# wherever that client happens to run, so they are the one thing the Origin
+# check below lets through.
+DISCOVERY_PREFIX = "/.well-known/"
+
 _MODE_NAMES = {
     ORDERS_MODE: ("Order Handling", "FastMCP Order Handling"),
     DATABRICKS_MODE: ("Databricks Orders", "FastMCP Databricks Orders"),
 }
+
+
+class SameOriginOnly:
+    """Refuses a request whose `Origin` is not one this deployment serves.
+
+    The MCP transport spec puts a MUST on validating `Origin`, and the SDK does
+    ship `TransportSecurityMiddleware` for it, but fastmcp 3.2.4 constructs it
+    with no settings, so DNS-rebinding protection defaults off and the check
+    returns before it reads the header.
+
+    Nothing is riding on this today: /mcp reads no cookies, it authorizes a
+    bearer token that a page on another origin cannot obtain, and no CORS
+    headers are served that would let one read the response. It is here because
+    the chat app sets a `SameSite=none` cookie on this same ingress host, which
+    is one change away from making ambient credentials reachable, and because a
+    header comparison is a cheaper thing to own than that argument.
+    """
+
+    def __init__(self, app: ASGIApp, allowed: frozenset[str]) -> None:
+        self.app = app
+        self.allowed = allowed
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        if scope["type"] == "http" and not path.startswith(DISCOVERY_PREFIX):
+            # Everything but discovery is checked, rather than naming /mcp,
+            # so an ingress that rewrites the path cannot quietly turn this
+            # off. Only a browser attaches Origin and only a browser is subject
+            # to the attack, so its absence is not a failure to report: the
+            # chat app calls this endpoint from its own process and sends none.
+            origin = Headers(scope=scope).get("origin")
+            if origin and origin not in self.allowed:
+                await PlainTextResponse("Origin not allowed", status_code=403)(
+                    scope, receive, send
+                )
+                return
+        await self.app(scope, receive, send)
+
+
+def allowed_origins() -> frozenset[str]:
+    """This server's own origin, plus any an operator adds for a browser client."""
+    extra = os.getenv("MCP_ALLOWED_ORIGINS", "").split(",")
+    origins = (_origin(url) for url in (os.getenv("MCP_SERVER_URL", ""), *extra))
+    return frozenset(origin for origin in origins if origin)
+
+
+def _origin(url: str) -> str:
+    parts = urlsplit(url.strip())
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def _required_env(name: str) -> str:
@@ -123,5 +188,7 @@ if __name__ == "__main__":
         transport="http",
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
+        path=MCP_PATH,
+        middleware=[Middleware(SameOriginOnly, allowed=allowed_origins())],
         show_banner=False,
     )

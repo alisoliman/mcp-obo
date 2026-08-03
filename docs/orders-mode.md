@@ -5,7 +5,7 @@ delegated identity, and your service owns its own data.
 
 The store here is an in-memory dict. Everything around it is production-shaped:
 two app registrations, two federated credentials, no secrets anywhere, and an
-on-behalf-of exchange on every call.
+on-behalf-of exchange behind every call.
 
 ## What it deploys
 
@@ -30,6 +30,15 @@ the server application:
 
 Orders move `pending → processing → shipped → delivered`. Pending or processing
 orders can be cancelled. Repeating the current status is idempotent.
+
+The three read tools are annotated `readOnlyHint`, `create_order` as writing but
+not destructive, and `update_order_status` as destructive and idempotent, since
+one of its transitions is cancellation. Those annotations are hints for a client
+to act on, and the chat app in this repo does not: it auto-approves every tool
+call, because the one-way SSE stream has nowhere to ask. So `create_order` and
+`update_order_status` run on arguments a model chose after reading text this
+application does not control. Build an approval channel before exposing a
+mutating tool that way.
 
 The identity proof returns the Graph display name, an eight-character hash of
 the object id, and the evidence label `Microsoft Graph /me via OBO`. It never
@@ -70,7 +79,10 @@ decision moved out of the process, so the server cannot get it wrong.
 1. Replace the tool functions in `src/orders.py`. Keep the
    `access_token: AccessToken = CurrentAccessToken()` parameter and the
    `current_user(access_token)` call at the top of each one. That pair is the
-   whole mechanism by which a tool becomes user-scoped.
+   whole mechanism by which a tool becomes user-scoped. An Entra refusal inside
+   that call reaches the user as a `ToolError` naming the AADSTS code; the Graph
+   request after it does not, so a Graph 403 is still flattened into an
+   indistinguishable error by `mask_error_details`.
 2. Swap the in-memory dict for a real store, partitioned by the Graph object id
    rather than by anything the model passed in.
 3. Rename `scopeValue` in `infra/main.bicep` if you want a different scope, and

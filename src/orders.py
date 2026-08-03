@@ -21,16 +21,36 @@ from typing import Annotated
 
 import httpx
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.dependencies import CurrentAccessToken
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from src.obo import GRAPH_SCOPE, OboExchange
+from src.obo import GRAPH_SCOPE, OboError, OboExchange
 
 # The single source of truth for these names: `src/chat.py` passes them to the
 # agent as its allow-list and the tests import them.
 ORDER_TOOLS = frozenset(
     {"who_am_i", "list_orders", "get_order", "create_order", "update_order_status"}
+)
+
+# Annotations are hints and this server still decides for itself, but they are
+# the only thing a client can read to tell a question from a change. Declaring
+# none leaves every tool here looking alike to anything applying a policy of its
+# own -- an approval prompt, an audit rule, a read-only session -- and the MCP
+# defaults are the unhelpful direction: unannotated means writing, and writing
+# means destructive.
+_READ_ONLY = ToolAnnotations(readOnlyHint=True)
+_ADDITIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False
+)
+# The status machine below only moves forward and one of its exits is
+# cancellation, so a client is right to treat this as destructive. Repeating a
+# call is not: `update_order_status_for` returns the order untouched when it is
+# already in the requested status.
+_ONE_WAY = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=True
 )
 
 Sku = Annotated[
@@ -165,7 +185,13 @@ def register(mcp: FastMCP, exchange: OboExchange) -> None:
         # demands a jwt_signing_key.
         #
         # Every tool goes through here, so no tool can read anyone else's data.
-        graph_token = await exchange.token(access_token.token, GRAPH_SCOPE)
+        try:
+            graph_token = await exchange.token(access_token.token, GRAPH_SCOPE)
+        except OboError as error:
+            # `mask_error_details` flattens everything but ToolError into one
+            # indistinguishable string, which is right for a bug and wrong for a
+            # Conditional Access policy or a missing consent.
+            raise ToolError(str(error)) from error
         response = await client.get(
             "https://graph.microsoft.com/v1.0/me",
             params={"$select": "id,displayName"},
@@ -174,7 +200,7 @@ def register(mcp: FastMCP, exchange: OboExchange) -> None:
         response.raise_for_status()
         return GraphUser.model_validate(response.json())
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     async def who_am_i(
         access_token: AccessToken = CurrentAccessToken(),
     ) -> IdentityProof:
@@ -182,7 +208,7 @@ def register(mcp: FastMCP, exchange: OboExchange) -> None:
         user = await current_user(access_token)
         return identity_proof_for(user)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     async def list_orders(
         access_token: AccessToken = CurrentAccessToken(),
     ) -> list[Order]:
@@ -190,7 +216,7 @@ def register(mcp: FastMCP, exchange: OboExchange) -> None:
         user = await current_user(access_token)
         return list_orders_for(user.id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     async def get_order(
         order_id: OrderId,
         access_token: AccessToken = CurrentAccessToken(),
@@ -199,7 +225,7 @@ def register(mcp: FastMCP, exchange: OboExchange) -> None:
         user = await current_user(access_token)
         return get_order_for(user.id, order_id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ADDITIVE)
     async def create_order(
         items: Annotated[list[OrderItem], Field(min_length=1, max_length=50)],
         access_token: AccessToken = CurrentAccessToken(),
@@ -208,7 +234,7 @@ def register(mcp: FastMCP, exchange: OboExchange) -> None:
         user = await current_user(access_token)
         return create_order_for(user.id, user.display_name, items)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ONE_WAY)
     async def update_order_status(
         order_id: OrderId,
         status: OrderStatus,

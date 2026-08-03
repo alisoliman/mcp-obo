@@ -7,6 +7,20 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # A floor under abuse of an anonymous public hostname served by one replica.
+    # Set high on purpose, because the per-client key is coarse here: nginx
+    # limits on the address it sees, the controller runs with the default
+    # externalTrafficPolicy so that address can be the node rather than the
+    # browser, and the chat pod's own tool calls come back through this same
+    # hostname (MCP_ENDPOINT) from a single pod address. Populations share a
+    # bucket, so the limit has to clear the busiest honest moment — a page load
+    # plus a chat turn's worth of MCP requests — and only bites scripted traffic.
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "10"
+    # Deliberately no limit-connections: /api/chat/stream holds an SSE response
+    # open for the length of a model turn, so a concurrency cap counts idle
+    # streams against that same shared address and would cut off real users
+    # long before it inconvenienced an attacker.
 spec:
   ingressClassName: nginx
   tls:
