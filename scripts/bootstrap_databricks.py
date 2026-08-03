@@ -28,8 +28,6 @@ from azure.identity import AzureCliCredential
 
 from src.obo import DATABRICKS_SCOPE
 
-ACCOUNTS_HOST = "https://accounts.azuredatabricks.net"
-AUDITORS_GROUP = "mcp_obo_auditors"
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
 
@@ -52,13 +50,10 @@ def required(name: str) -> str:
 class Config:
     host: str
     workspace_name: str
-    workspace_id: str
     workspace_resource_id: str
-    region: str
     catalog: str
     schema: str
     warehouse_name: str
-    account_id: str
 
     @classmethod
     def from_env(cls) -> Config:
@@ -72,13 +67,6 @@ class Config:
             catalog=required("DATABRICKS_CATALOG"),
             schema=required("DATABRICKS_SCHEMA"),
             warehouse_name=required("DATABRICKS_WAREHOUSE_NAME"),
-            # The last three are needed only when this workspace has no
-            # metastore assigned, which on Azure is rare — one is provisioned
-            # automatically. Requiring them unconditionally would fail every
-            # normal run for the sake of a branch that almost never executes.
-            workspace_id=env("DATABRICKS_WORKSPACE_NUMERIC_ID"),
-            region=env("AZURE_LOCATION", "northeurope"),
-            account_id=env("DATABRICKS_ACCOUNT_ID"),
         )
 
 
@@ -141,15 +129,13 @@ def log(message: str) -> None:
 
 
 def ensure_metastore(api: Databricks, config: Config) -> None:
-    """Confirm a Unity Catalog metastore is assigned, creating one if allowed.
+    """Confirm a Unity Catalog metastore is assigned.
 
-    On Azure the usual answer is "already assigned": a metastore is
-    auto-provisioned with the first workspace in a region, which is why the
-    accelerator needs no Databricks account administrator. The account-API
-    branch below covers tenants where that automatic assignment is switched
-    off. It is deliberately kept, and just as deliberately flagged: it has not
-    been exercised against a live account, because no deployment of this
-    template has needed it.
+    On Azure the answer is "already assigned": one is auto-provisioned with the
+    first workspace in a region, which is why this accelerator needs no
+    Databricks account administrator. Creating one is an account-level
+    operation, so a tenant with that automatic assignment switched off has to
+    do it by hand before running this.
     """
     current = api.call(
         "GET",
@@ -160,53 +146,13 @@ def ensure_metastore(api: Databricks, config: Config) -> None:
         log(f"metastore already assigned: {current['metastore_id']}")
         return
 
-    if not config.account_id:
-        raise BootstrapError(
-            "This workspace has no Unity Catalog metastore, and creating one is an\n"
-            "account-level operation. Set DATABRICKS_ACCOUNT_ID and re-run:\n\n"
-            "  1. Sign in to https://accounts.azuredatabricks.net as an Entra\n"
-            "     Global Administrator (this also makes you a Databricks account\n"
-            "     admin the first time).\n"
-            "  2. Copy the account id from the user menu.\n"
-            "  3. azd env set DATABRICKS_ACCOUNT_ID <account-id>\n"
-        )
-    if not config.workspace_id:
-        raise BootstrapError(
-            "DATABRICKS_WORKSPACE_NUMERIC_ID is required to assign a metastore"
-        )
-
-    base = f"{ACCOUNTS_HOST}/api/2.0/accounts/{config.account_id}"
-    existing = api.call("GET", f"{base}/metastores") or {}
-    # A metastore is one per region per account, so an existing one in this
-    # region must be reused rather than duplicated. Creating a second is not
-    # merely wasteful — it is an account-wide side effect.
-    for metastore in existing.get("metastores", []):
-        if metastore.get("region") == config.region:
-            metastore_id = str(metastore["metastore_id"])
-            log(f"reusing account metastore in {config.region}: {metastore_id}")
-            break
-    else:
-        created = api.call(
-            "POST",
-            f"{base}/metastores",
-            json_body={
-                "metastore_info": {
-                    "name": f"mcp-obo-{config.region}",
-                    "region": config.region,
-                }
-            },
-        ) or {}
-        metastore_id = str(
-            created.get("metastore_info", created).get("metastore_id", "")
-        )
-        log(f"created metastore {metastore_id}")
-
-    api.call(
-        "PUT",
-        f"{base}/workspaces/{config.workspace_id}/metastore",
-        json_body={"metastore_id": metastore_id},
+    raise BootstrapError(
+        "This workspace has no Unity Catalog metastore. Creating and assigning\n"
+        "one is an account-level operation: sign in to\n"
+        "https://accounts.azuredatabricks.net as an Entra Global Administrator,\n"
+        "create a metastore in this region, assign it to the workspace, then\n"
+        "re-run. See docs/databricks-mode.md.\n"
     )
-    log(f"assigned metastore to workspace {config.workspace_id}")
 
 
 # --------------------------------------------------------------------------
@@ -398,7 +344,6 @@ def seed(
     schema = config.schema
     qualified = f"{catalog}.{schema}"
     orders = f"{qualified}.orders"
-    payroll = f"{qualified}.payroll"
     row_filter = f"{qualified}.orders_row_filter"
     mask = f"{qualified}.mask_email"
 
@@ -421,16 +366,18 @@ def seed(
     # be replaced. Rebuilding from scratch also keeps the row counts the
     # end-to-end harness asserts on exactly right.
     sql(f"DROP TABLE IF EXISTS {orders}")
-    sql(f"DROP TABLE IF EXISTS {payroll}")
 
     sql(
         f"CREATE OR REPLACE FUNCTION {row_filter}(owner STRING) "
         "RETURNS BOOLEAN RETURN owner = current_user()"
     )
+    # Unconditional on purpose. A real deployment would exempt a group here --
+    # `CASE WHEN is_account_group_member('auditors') THEN email ELSE ... END` --
+    # but creating an account-level group needs a Databricks account admin, and
+    # this accelerator deliberately requires none.
     sql(
-        f"CREATE OR REPLACE FUNCTION {mask}(email STRING) RETURNS STRING RETURN "
-        f"CASE WHEN is_account_group_member('{AUDITORS_GROUP}') THEN email "
-        "ELSE concat('***@', split_part(email, '@', 2)) END"
+        f"CREATE OR REPLACE FUNCTION {mask}(email STRING) RETURNS STRING "
+        "RETURN concat('***@', split_part(email, '@', 2))"
     )
     log("row filter and column mask functions created")
 
@@ -471,12 +418,6 @@ def seed(
     sql(f"ALTER TABLE {orders} ALTER COLUMN customer_email SET MASK {mask}")
     log("row filter and column mask attached")
 
-    sql(
-        f"CREATE TABLE {payroll} (employee STRING, salary_cents BIGINT) "
-        "COMMENT 'Deliberately never granted to the demo user'"
-    )
-    sql(f"INSERT INTO {payroll} VALUES ('{user}', 100000000)")
-
     # Grants a non-admin consumer needs, applied for every seeded owner. The
     # deployer is usually the catalog owner and already has these implicitly;
     # they are stated so a customer can point the demo at a normal user and have
@@ -496,10 +437,7 @@ def seed(
             log(f"granted SELECT on orders to {owner}")
         except BootstrapError as error:
             log(f"could not grant to {owner} (not provisioned?): {error}")
-    # payroll is deliberately never granted. Note that whoever runs this
-    # bootstrap OWNS it and can therefore still read it -- the denial is
-    # visible to the other seeded owners, not to the operator.
-    log("grants applied to orders; payroll left ungranted for non-owners")
+    log("grants applied to orders")
     return len(rows), per_owner
 
 

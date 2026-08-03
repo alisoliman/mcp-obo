@@ -475,6 +475,9 @@ resource clientFoundryAccess 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
+// The AZURE_-prefixed names are azd's own convention and are read by the CLI
+// rather than by anything in this repository. Everything below them is
+// consumed by azure.yaml or the deployment hooks.
 output AZURE_RESOURCE_GROUP string = resourceGroup().name
 output AZURE_SUBSCRIPTION_ID string = subscription().subscriptionId
 output AZURE_TENANT_ID string = tenant().tenantId
@@ -482,14 +485,8 @@ output AZURE_AKS_CLUSTER_NAME string = aks.name
 output AZURE_AKS_NAMESPACE string = namespaceName
 output AZURE_CONTAINER_REGISTRY_NAME string = acr.name
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = acr.properties.loginServer
-output AKS_CLUSTER_NAME string = aks.name
-output ACR_NAME string = acr.name
-output ACR_LOGIN_SERVER string = acr.properties.loginServer
 output MCP_IMAGE_NAME string = serverImageName
 output CHAT_IMAGE_NAME string = clientImageName
-output K8S_NAMESPACE string = namespaceName
-output MCP_SERVICE_ACCOUNT string = serverServiceAccountName
-output CHAT_SERVICE_ACCOUNT string = clientServiceAccountName
 output ENTRA_SERVER_CLIENT_ID string = serverApp.appId
 output ENTRA_CLIENT_CLIENT_ID string = clientApp.appId
 output MCP_SCOPE string = 'api://${serverApp.appId}/${scopeValue}'
@@ -503,16 +500,13 @@ output INGRESS_PUBLIC_IP_RESOURCE_GROUP string = resourceGroup().name
 output FOUNDRY_PROJECT_ENDPOINT string = foundryProject.properties.endpoints['AI Foundry API']
 output FOUNDRY_MODEL_DEPLOYMENT_NAME string = modelDeployment.name
 output MCP_MODE string = deploymentMode
-// Empty when deployDatabricks is false, which is exactly what makes the MCP
-// server skip registering the Databricks tools.
+// Empty in orders mode. `MCP_MODE` is what selects the tool set; the MCP server
+// refuses to start if it is set to databricks without this host.
 output DATABRICKS_HOST string = deployDatabricks
   ? 'https://${databricks!.properties.workspaceUrl}'
   : ''
 output DATABRICKS_WORKSPACE_NAME string = deployDatabricks ? databricks!.name : ''
 output DATABRICKS_WORKSPACE_RESOURCE_ID string = deployDatabricks ? databricks!.id : ''
-output DATABRICKS_WORKSPACE_NUMERIC_ID string = deployDatabricks
-  ? databricks!.properties.workspaceId
-  : ''
 // The preferred catalog name. The bootstrap writes back the one it actually
 // used, which differs when it falls back to the workspace's managed catalog.
 output DATABRICKS_CATALOG string = deployDatabricks ? databricksCatalogName : ''

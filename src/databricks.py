@@ -6,13 +6,9 @@ carried into Databricks is the caller's. Unity Catalog applies the row filter,
 the column mask, and the table grants, and Databricks writes the caller's name
 -- not this server's -- into its audit log.
 
-Contrast this with the order tools in `server.py`, which partition an in-memory
-store by Graph object id. That hand-rolled filtering is correct only for as long
-as every tool remembers to do it. Here the server could not return another
-user's rows if it tried, because it never had the ability to read them.
-
-The tools are registered only when `DATABRICKS_HOST` is set, so the accelerator
-still runs unchanged for anyone who has not deployed the workspace.
+`src/orders.py` is the same identity path with the decision left inside the
+process. Compare the two `register` functions: they differ in the scope they ask
+Entra for, and in who decides what comes back.
 """
 
 from __future__ import annotations

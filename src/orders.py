@@ -82,7 +82,6 @@ class GraphUser(BaseModel):
 
     id: str
     display_name: str = Field(alias="displayName")
-    user_principal_name: str | None = Field(default=None, alias="userPrincipalName")
 
 
 class IdentityProof(BaseModel):
@@ -178,7 +177,7 @@ def register(mcp: FastMCP, exchange: OboExchange) -> None:
         graph_token = await exchange.token(access_token.token, GRAPH_SCOPE)
         response = await client.get(
             "https://graph.microsoft.com/v1.0/me",
-            params={"$select": "id,displayName,userPrincipalName"},
+            params={"$select": "id,displayName"},
             headers={"Authorization": f"Bearer {graph_token}"},
         )
         response.raise_for_status()

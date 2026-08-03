@@ -61,12 +61,6 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
-import {
   Tool,
   ToolContent,
   ToolHeader,
@@ -129,51 +123,79 @@ type SessionInfo = {
   authenticated: boolean
   profile?: SessionProfile
   csrfToken?: string
-  historyKey?: string
   model: string
+  mode: McpMode
   mcp: {
-    name: string
     tools: string[]
   }
 }
 
-const HISTORY_PREFIX = "order-agent-chat-history"
 const THEME_KEY = "order-agent-theme"
-const STORED_MESSAGE_LIMIT = 100
-const suggestions = [
-  "What orders do I have?",
-  "Create an order for two DEMO-001 items at 1299 cents each.",
-  "Prove which Graph identity the MCP server resolved for me.",
-]
 
-const identitySteps = [
-  {
-    icon: UserRound,
-    label: "Signed-in user",
-    detail: "Delegated Entra session",
-    tone: "identity",
+/* The server sends the deployment mode because it decides which downstream
+   resource the on-behalf-of exchange targets. Everything below that names a
+   resource hangs off it, so the UI cannot claim Microsoft Graph in a
+   deployment where Graph is never contacted. */
+const modes = {
+  orders: {
+    downstream: "Microsoft Graph",
+    downstreamDetail: "Token exchange + Graph /me",
+    mcpLabel: "Order MCP",
+    proof: "the Graph identity resolved through OBO",
+    exchange: "exchanges it for a Graph token and resolves your identity",
+    suggestions: [
+      "What orders do I have?",
+      "Create an order for two DEMO-001 items at 1299 cents each.",
+      "Prove which Graph identity the MCP server resolved for me.",
+    ],
   },
-  {
-    icon: Bot,
-    label: "Agent runtime",
-    detail: "Microsoft Foundry",
-    tone: "protocol",
+  databricks: {
+    downstream: "Azure Databricks",
+    downstreamDetail: "Token exchange + Unity Catalog",
+    mcpLabel: "Databricks MCP",
+    proof: "the identity Unity Catalog filtered these rows for",
+    exchange: "exchanges it for a Databricks token that still carries you",
+    suggestions: [
+      "What orders do I have?",
+      "Which orders of mine are in the EU region?",
+      "Prove which identity Databricks resolved for me.",
+    ],
   },
-  {
-    icon: Wrench,
-    label: "Order MCP",
-    detail: "User token forwarded",
-    tone: "protocol",
-  },
-  {
-    icon: Database,
-    label: "Microsoft Graph",
-    detail: "Token exchange + Graph /me",
-    tone: "identity",
-  },
-] as const
+} as const
 
-type IdentityStep = (typeof identitySteps)[number]
+type McpMode = keyof typeof modes
+
+function identityStepsFor(mode: McpMode) {
+  const target = modes[mode]
+  return [
+    {
+      icon: UserRound,
+      label: "Signed-in user",
+      detail: "Delegated Entra session",
+      tone: "identity",
+    },
+    {
+      icon: Bot,
+      label: "Agent runtime",
+      detail: "Microsoft Foundry",
+      tone: "protocol",
+    },
+    {
+      icon: Wrench,
+      label: target.mcpLabel,
+      detail: "User token forwarded",
+      tone: "protocol",
+    },
+    {
+      icon: Database,
+      label: target.downstream,
+      detail: target.downstreamDetail,
+      tone: "identity",
+    },
+  ] as const
+}
+
+type IdentityStep = ReturnType<typeof identityStepsFor>[number]
 
 function storedTheme(): Theme {
   const saved = localStorage.getItem(THEME_KEY)
@@ -200,63 +222,6 @@ function useTheme() {
   return {
     theme,
     toggle: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
-  }
-}
-
-function historyStorageKey(historyKey: string) {
-  return `${HISTORY_PREFIX}:${historyKey}`
-}
-
-function clearOtherHistories(activeKey?: string) {
-  const activeStorageKey = activeKey ? historyStorageKey(activeKey) : null
-  for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
-    const key = sessionStorage.key(index)
-    if (
-      key?.startsWith(HISTORY_PREFIX) &&
-      key !== activeStorageKey
-    ) {
-      sessionStorage.removeItem(key)
-    }
-  }
-}
-
-function storedMessages(historyKey: string): ChatMessage[] {
-  try {
-    const value = sessionStorage.getItem(historyStorageKey(historyKey))
-    const parsed = value ? (JSON.parse(value) as unknown) : []
-    if (!Array.isArray(parsed)) {
-      return []
-    }
-    return parsed
-      .filter(
-        (message): message is ChatMessage =>
-          typeof message === "object" &&
-          message !== null &&
-          typeof message.id === "string" &&
-          ["user", "assistant", "error"].includes(String(message.role)) &&
-          typeof message.content === "string"
-      )
-      .flatMap((message) => {
-        const tools = (message.tools ?? []).map((tool) =>
-          tool.state === "running"
-            ? {
-                ...tool,
-                state: "error" as const,
-                error: "Interrupted before completion.",
-              }
-            : tool
-        )
-        if (
-          message.role === "assistant" &&
-          !message.content &&
-          tools.length === 0
-        ) {
-          return []
-        }
-        return [{ ...message, tools }]
-      })
-  } catch {
-    return []
   }
 }
 
@@ -369,20 +334,16 @@ function ThemeToggle({
 }) {
   const label = theme === "dark" ? "Use light theme" : "Use dark theme"
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label={label}
-          onClick={onToggle}
-        >
-          {theme === "dark" ? <Sun /> : <Moon />}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      aria-label={label}
+      title={label}
+      onClick={onToggle}
+    >
+      {theme === "dark" ? <Sun /> : <Moon />}
+    </Button>
   )
 }
 
@@ -437,6 +398,7 @@ function IdentityStepRow({
 }
 
 function ContextRail({ session }: { session: SessionInfo }) {
+  const steps = identityStepsFor(session.mode)
   return (
     <aside className="hidden min-h-0 flex-col border-r bg-sidebar lg:flex">
       <div className="flex h-16 items-center gap-3 border-b px-5">
@@ -452,11 +414,11 @@ function ContextRail({ session }: { session: SessionInfo }) {
           Identity path
         </p>
         <ol className="relative space-y-1" aria-label="Delegated identity path">
-          {identitySteps.map((step, index) => (
+          {steps.map((step, index) => (
             <IdentityStepRow
               key={step.label}
               step={step}
-              connected={index < identitySteps.length - 1}
+              connected={index < steps.length - 1}
             />
           ))}
         </ol>
@@ -594,12 +556,15 @@ function PendingMessage() {
 }
 
 function EmptyConversation({
+  mode,
   onSuggestion,
   disabled,
 }: {
+  mode: McpMode
   onSuggestion: (message: string) => void
   disabled: boolean
 }) {
+  const target = modes[mode]
   return (
     <div className="flex min-h-full min-w-0 flex-1 items-center overflow-hidden">
       <div className="mx-auto w-full min-w-0 max-w-2xl px-5 py-10 md:px-8">
@@ -611,13 +576,13 @@ function EmptyConversation({
         </h1>
         <p className="mt-2 max-w-[60ch] text-sm leading-6 text-muted-foreground text-pretty">
           Responses stream from Foundry. When the agent needs order data, each
-          tool card shows the MCP call and the Graph identity resolved through OBO.
+          tool card shows the MCP call and {target.proof}.
         </p>
         <div
           className="mt-7 grid gap-2 sm:flex sm:flex-wrap"
           aria-label="Suggested prompts"
         >
-          {suggestions.map((suggestion) => (
+          {target.suggestions.map((suggestion) => (
             <Button
               key={suggestion}
               type="button"
@@ -786,6 +751,8 @@ function SignedOut({
   theme: Theme
   onTheme: () => void
 }) {
+  const target = modes[session.mode]
+  const steps = identityStepsFor(session.mode)
   return (
     <div className="flex min-h-dvh flex-col bg-background">
       <header className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between border-b px-5 md:px-8">
@@ -809,8 +776,8 @@ function SignedOut({
           </h1>
           <p className="mt-5 max-w-[65ch] text-base leading-7 text-muted-foreground text-pretty">
             Sign in and ask about sample orders using {session.model}. The chat
-            forwards your delegated token to a separate MCP server, which exchanges
-            it for a Graph token and resolves your identity before each tool runs.
+            forwards your delegated token to a separate MCP server, which{" "}
+            {target.exchange} before each tool runs.
           </p>
           <Button asChild size="lg" className="mt-8">
             <a href="/login">
@@ -841,7 +808,7 @@ function SignedOut({
           </div>
           <Separator className="my-5" />
           <ol className="space-y-4">
-            {identitySteps.map((step) => (
+            {steps.map((step) => (
               <IdentityStepRow key={step.label} step={step} />
             ))}
           </ol>
@@ -895,31 +862,16 @@ function ChatWorkspace({
     authenticated: true
     profile: SessionProfile
     csrfToken: string
-    historyKey: string
   }
   theme: Theme
   onTheme: () => void
 }) {
-  const [messages, setMessages] = useState<ChatMessage[]>(() =>
-    storedMessages(session.historyKey)
-  )
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState("")
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState("")
   const streamAbort = useRef<AbortController | null>(null)
-
-  useEffect(() => {
-    const key = historyStorageKey(session.historyKey)
-    try {
-      sessionStorage.setItem(
-        key,
-        JSON.stringify(messages.slice(-STORED_MESSAGE_LIMIT))
-      )
-    } catch {
-      sessionStorage.removeItem(key)
-    }
-  }, [messages, session.historyKey])
 
   useEffect(
     () => () => {
@@ -1157,7 +1109,6 @@ function ChatWorkspace({
       if (!response.ok || !payload.logoutUrl) {
         throw new Error(payload.error || "Sign-out failed.")
       }
-      sessionStorage.removeItem(historyStorageKey(session.historyKey))
       window.location.assign(payload.logoutUrl)
     } catch (logoutError) {
       const detail =
@@ -1165,7 +1116,7 @@ function ChatWorkspace({
       setError(detail)
       setAnnouncement("Sign out failed")
     }
-  }, [session.csrfToken, session.historyKey])
+  }, [session.csrfToken])
 
   return (
     <div className="grid h-dvh min-h-0 w-full overflow-hidden bg-background lg:grid-cols-[17rem_minmax(0,1fr)]">
@@ -1192,9 +1143,6 @@ function ChatWorkspace({
             </div>
           </div>
           <div className="flex items-center gap-1">
-            <div className="hidden sm:block">
-              <ThemeToggle theme={theme} onToggle={onTheme} />
-            </div>
             <UserMenu
               profile={session.profile}
               theme={theme}
@@ -1216,6 +1164,7 @@ function ChatWorkspace({
               >
                 {messages.length === 0 ? (
                   <EmptyConversation
+                    mode={session.mode}
                     disabled={pending}
                     onSuggestion={(message) => void sendMessage(message)}
                   />
@@ -1268,11 +1217,6 @@ function App() {
         throw new Error("Session bootstrap failed")
       }
       const payload = (await response.json()) as SessionInfo
-      clearOtherHistories(
-        payload.authenticated && payload.historyKey
-          ? payload.historyKey
-          : undefined
-      )
       setSession(payload)
     } catch {
       setBootstrapError(true)
@@ -1289,12 +1233,7 @@ function App() {
   if (!session) {
     return <LoadingScreen />
   }
-  if (
-    session.authenticated &&
-    session.profile &&
-    session.csrfToken &&
-    session.historyKey
-  ) {
+  if (session.authenticated && session.profile && session.csrfToken) {
     return (
       <ChatWorkspace
         session={{
@@ -1302,7 +1241,6 @@ function App() {
           authenticated: true,
           profile: session.profile,
           csrfToken: session.csrfToken,
-          historyKey: session.historyKey,
         }}
         theme={theme}
         onTheme={toggle}
@@ -1312,10 +1250,4 @@ function App() {
   return <SignedOut session={session} theme={theme} onTheme={toggle} />
 }
 
-export default function Root() {
-  return (
-    <TooltipProvider>
-      <App />
-    </TooltipProvider>
-  )
-}
+export default App

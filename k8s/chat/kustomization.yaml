@@ -43,7 +43,3 @@ replacements:
     select:
       kind: Ingress
       name: order-agent
-images:
-- name: chat-image
-  newName: acrfwx3kpmaheiky.azurecr.io/order-agent-chat
-  newTag: azd-deploy-1784668727

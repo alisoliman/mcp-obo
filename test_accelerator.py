@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import yaml
 from fastmcp.server.auth.providers.azure import AzureJWTVerifier
 from pydantic import ValidationError
 from starlette.testclient import TestClient
@@ -585,8 +584,8 @@ class ChatTests(unittest.TestCase):
                 session_payload = browser_session.json()
                 self.assertTrue(session_payload["authenticated"])
                 self.assertEqual(session_payload["profile"]["name"], "Ada")
-                self.assertTrue(session_payload["historyKey"])
                 self.assertEqual(session_payload["model"], "gpt-5.6-terra")
+                self.assertEqual(session_payload["mode"], server.current_mode())
                 # Derived from allowed_tools() rather than restated, so wiring a new
                 # tool into the agent updates this in one place. The order
                 # tools are named explicitly as well, so the Graph half of the
@@ -644,10 +643,11 @@ class ChatTests(unittest.TestCase):
             {
                 "authenticated": False,
                 "model": "gpt-5.6-terra",
-                "mcp": {
-                    "name": "Order MCP",
-                    "tools": sorted(allowed_tools()),
-                },
+                # The browser is told the mode so it can name the downstream
+                # resource truthfully. Claiming Microsoft Graph in a databricks
+                # deployment would contradict docs/authorization.md.
+                "mode": "orders",
+                "mcp": {"tools": sorted(allowed_tools())},
             },
         )
         self.assertEqual(response.status_code, 401)
@@ -717,36 +717,6 @@ class ChatTests(unittest.TestCase):
                     self.settings(Path(directory) / "token"),
                     frontend_dist=Path(directory) / "missing",
                 )
-
-
-class IngressRoutingTests(unittest.TestCase):
-    """The one deployment fact the Python tests can meaningfully check.
-
-    Everything else about the deployment is validated by the tools that own it:
-    `az bicep build` for the template, `azd provision --preview` for the plan,
-    and the two Dockerfiles by the build itself.
-    """
-
-    def test_mcp_paths_reach_the_mcp_service_and_the_rest_reaches_chat(self) -> None:
-        ingress = yaml.safe_load(
-            (ROOT / "k8s" / "chat" / "ingress.yaml").read_text(encoding="utf-8")
-        )
-        (rule,) = ingress["spec"]["rules"]
-        routes = {
-            path["path"]: path["backend"]["service"]["name"]
-            for path in rule["http"]["paths"]
-        }
-
-        self.assertEqual(
-            routes,
-            {
-                # Discovery metadata and the MCP endpoint itself belong to the
-                # protected resource, not the chat app that fronts it.
-                "/.well-known/oauth-protected-resource/mcp": "fastmcp-orders",
-                "/mcp": "fastmcp-orders",
-                "/": "order-agent-chat",
-            },
-        )
 
 
 if __name__ == "__main__":

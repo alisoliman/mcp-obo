@@ -85,10 +85,10 @@ query: {
     style.stroke: "#A4262C"
     style.stroke-width: 2
   }
-  uc -> uc: "row filter: owner_email = current_user()\ncolumn mask: customer_email\ntable grants: orders yes, payroll no" {
+  uc -> uc: "row filter: owner_email = current_user()\ncolumn mask: customer_email" {
     style.stroke: "#A4262C"
   }
-  uc -> warehouse: "3 of 9 rows, email masked" {
+  uc -> warehouse: "only the caller's rows, email masked" {
     style.stroke: "#A4262C"
     style.stroke-width: 2
   }
@@ -96,7 +96,7 @@ query: {
     style.stroke: "#006731"
     style.stroke-width: 2
   }
-  mcp -> chat: "the server filtered nothing —\nit never had the other six rows" {
+  mcp -> chat: "the server filtered nothing —\nit never had anyone else's rows" {
     style.stroke: "#006731"
     style.stroke-width: 2
   }

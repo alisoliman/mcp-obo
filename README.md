@@ -115,9 +115,9 @@ also discovers the end-to-end module, which calls the deployed stack, so the
 fast local loop would quietly become live round trips once you have deployed.
 
 The Python tests cover the order rules, per-user isolation, the mode switch, the
-MCP token and scope requirements, the browser session and CSRF behaviour, the
-ingress routing split, and that the compiled template requests no application
-permission. Everything else is checked by the tool that owns it: Bicep for the
+MCP token and scope requirements, the browser session and CSRF behaviour, and
+that the compiled template requests no application permission. Everything else
+is checked by the tool that owns it: Bicep for the
 template, `azd provision --preview` for the plan, and the two image builds for
 the Dockerfiles.
 
@@ -163,10 +163,11 @@ done
   it to start. Demo tables are dropped and reseeded on every bootstrap run.
 - Public demo DNS through the public IP's `cloudapp.azure.com` label.
 - No database, Redis, Key Vault, custom domain, private network, or telemetry.
+- The transcript lives in the browser tab only; a reload starts a fresh one.
 
-`azd deploy` rewrites the `images:` block of both `k8s/*/kustomization.yaml`
-files with the tag it just built, so those two files show as modified after
-every deployment. That is expected and does not need committing.
+`azd deploy` writes an `images:` block into both `k8s/*/kustomization.yaml`
+files naming the tag it just built. Those edits are local to your deployment and
+are not committed.
 
 ## Clean up
 
