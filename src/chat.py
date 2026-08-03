@@ -148,7 +148,6 @@ class Settings:
 @dataclass
 class BrowserSession:
     csrf_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
-    history_key: str = field(default_factory=lambda: secrets.token_urlsafe(18))
     token_cache: str = ""
     auth_flow: dict[str, Any] | None = None
     profile: dict[str, Any] | None = None
@@ -352,44 +351,34 @@ def create_app(
         return FileResponse(static_root / "favicon.svg", media_type="image/svg+xml")
 
     async def session_info(request: Request) -> JSONResponse:
-        common = {
+        payload: dict[str, Any] = {
+            "authenticated": False,
             "model": config.foundry_model,
-            "mcp": {
-                "name": "Order MCP",
-                "tools": sorted(allowed_tools()),
-            },
+            # The browser needs the mode because it decides which downstream
+            # resource the exchange targets. Without it the UI keeps naming
+            # Microsoft Graph in databricks mode, where Graph is never
+            # contacted at runtime.
+            "mode": current_mode(),
+            "mcp": {"tools": sorted(allowed_tools())},
         }
         active = current_session(request)
-        if active is None:
-            return JSONResponse(
-                {"authenticated": False, **common},
-                headers={"Cache-Control": "no-store"},
-            )
+        if active is None or active[1].profile is None:
+            return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
         _, session = active
-        if session.profile is None:
-            return JSONResponse(
-                {"authenticated": False, **common},
-                headers={"Cache-Control": "no-store"},
-            )
+        claims = session.profile or {}
         username = str(
-            session.profile.get("preferred_username")
-            or session.profile.get("email")
-            or ""
+            claims.get("preferred_username") or claims.get("email") or ""
         )
-        profile = {
-            "name": str(session.profile.get("name") or "Signed-in user"),
-            **({"username": username} if username else {}),
-        }
-        return JSONResponse(
-            {
-                "authenticated": True,
-                "profile": profile,
-                "csrfToken": session.csrf_token,
-                "historyKey": session.history_key,
-                **common,
+        payload.update(
+            authenticated=True,
+            profile={
+                "name": str(claims.get("name") or "Signed-in user"),
+                **({"username": username} if username else {}),
             },
-            headers={"Cache-Control": "no-store"},
+            csrfToken=session.csrf_token,
         )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     async def health(_: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})

@@ -167,12 +167,6 @@ coverage for the `Microsoft.Databricks` provider, so it silently omits those
 resources rather than reporting them as unchanged. Confirm with
 `az bicep build` instead.
 
-**A note on `payroll`** — the bootstrap creates an ungranted `payroll` table.
-Whoever runs the bootstrap *owns* it and can therefore still read it; the denial
-is visible to the other seeded owners, not to the operator. The claim that no
-application-only path exists is proved separately, by asserting the server
-application holds no `Role` permission.
-
 ## Customer-managed catalog storage
 
 The template uses Databricks Default Storage, which needs no storage account, no

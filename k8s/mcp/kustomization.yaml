@@ -30,7 +30,3 @@ replacements:
     select:
       kind: ServiceAccount
       name: fastmcp-orders
-images:
-- name: mcp-image
-  newName: acrfwx3kpmaheiky.azurecr.io/fastmcp-order-server
-  newTag: azd-deploy-1784668792

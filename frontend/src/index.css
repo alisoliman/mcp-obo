@@ -38,6 +38,7 @@
   --color-protocol-soft: var(--protocol-soft);
   --color-success: var(--success);
   --color-success-soft: var(--success-soft);
+  --color-workbench: var(--workbench);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -49,7 +50,8 @@
 
 /* Elevation ramp: canvas (background) < sidebar/workbench < card.
    Every adjacent pair clears a measured contrast floor, so structure reads
-   without relying on a single hairline. See DESIGN.md for the measured table. */
+   without relying on a single hairline. Card holds 1.10:1 against canvas, the
+   rail 1.05:1, and control borders 3:1 for WCAG 1.4.11. */
 :root {
   --background: oklch(0.961 0.006 250);
   --foreground: oklch(0.18 0.018 250);
