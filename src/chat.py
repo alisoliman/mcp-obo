@@ -1,14 +1,13 @@
 """Order agent chat: the confidential client in the delegated OBO flow.
 
-The workload's own AKS identity is used for exactly two things — signing the
-client assertion during the authorization code flow, and authenticating to
-Microsoft Foundry for inference. It is never used to call the MCP server.
+The workload's own AKS identity signs the client assertion during the
+authorization code flow and authenticates to Microsoft Foundry for inference. It
+is never used to call the MCP server.
 
 Every MCP request instead carries the signed-in user's delegated token, taken
-from that user's server-side MSAL cache and set as the `Authorization` header
-on the httpx client that `MCPStreamableHTTPTool` uses. Tokens stay on the
-server; the browser only ever sees a session cookie, a CSRF token, and the
-sanitized tool events streamed back over SSE.
+from that user's server-side MSAL cache. Tokens stay on the server; the browser
+only ever sees a session cookie, a CSRF token, and the sanitized tool events
+streamed back over SSE.
 """
 
 from __future__ import annotations
@@ -163,8 +162,6 @@ class ChatRequest(BaseModel):
 
 
 def _safe_event_value(value: Any, *, depth: int = 0) -> Any:
-    # Tool payloads nest at most list[order] -> items -> item -> leaf, so this
-    # ceiling only trips on something unexpected.
     if depth >= 8:
         return "[truncated]"
     if isinstance(value, BaseModel):
@@ -218,7 +215,7 @@ def _tool_result_value(value: Any) -> Any:
     for text in text_values:
         try:
             return json.loads(text)
-        except (TypeError, json.JSONDecodeError):
+        except json.JSONDecodeError:
             continue
     return text_values[0] if len(text_values) == 1 else text_values
 
@@ -241,8 +238,6 @@ class ToolEventMiddleware(FunctionMiddleware):
         )
         try:
             await call_next()
-        except asyncio.CancelledError:
-            raise
         except Exception:
             await self.events.put(
                 (
@@ -302,8 +297,8 @@ def _save_cache(session: BrowserSession, cache: SerializableTokenCache) -> None:
 
 def _cookie(response: Response, session_id: str) -> None:
     # Entra returns the authorization code as a cross-site form POST, which a
-    # SameSite=Lax cookie would not accompany. Every state-changing route
-    # therefore checks the CSRF header instead of relying on SameSite.
+    # SameSite=Lax cookie would not accompany. Every state-changing route checks
+    # the CSRF header instead of relying on SameSite.
     response.set_cookie(
         COOKIE_NAME,
         session_id,
@@ -354,10 +349,8 @@ def create_app(
         payload: dict[str, Any] = {
             "authenticated": False,
             "model": config.foundry_model,
-            # The browser needs the mode because it decides which downstream
-            # resource the exchange targets. Without it the UI keeps naming
-            # Microsoft Graph in databricks mode, where Graph is never
-            # contacted at runtime.
+            # The browser needs the mode to name the downstream resource
+            # truthfully; Graph is never contacted in databricks mode.
             "mode": current_mode(),
             "mcp": {"tools": sorted(allowed_tools())},
         }
@@ -557,8 +550,6 @@ def create_app(
                                         {"text": final.text},
                                     )
                                 )
-                            except asyncio.CancelledError:
-                                raise
                             except Exception as exc:
                                 await tool_events.put(("stream.exception", exc))
                             finally:
@@ -581,8 +572,6 @@ def create_app(
                                 )
                             else:
                                 yield _sse_event(event_name, event_payload)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 logger.exception("Streaming agent request failed")
                 yield _sse_event(

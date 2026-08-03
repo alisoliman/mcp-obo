@@ -1,19 +1,14 @@
 """Orders mode: the MCP server authorizes, using Microsoft Graph to say who you are.
 
-This is the starting point for building your own MCP server on Azure. The store
-is an in-memory dict, but the identity path around it is the real thing: the
-caller's token is exchanged on their behalf for a Microsoft Graph token, Graph
-`/me` returns the object id of the human who asked, and that object id is the
-only key the store is partitioned by.
+The store is an in-memory dict, but the identity path around it is the real
+thing: the caller's token is exchanged on their behalf for a Microsoft Graph
+token, Graph `/me` returns the object id of the human who asked, and that
+object id is the only key the store is partitioned by.
 
-Note where the authorization decision lives. `list_orders_for(user.id)` is a
-line of Python. It is correct only for as long as every tool remembers to pass
-the caller's id and nothing else. That is a fine trade for a service that owns
-its own data, and it is the model most MCP servers need.
-
-`src/databricks.py` is the same identity path with the decision moved out of the
-process entirely. Compare the two `register` functions: they differ in the scope
-they ask Entra for, and in who decides what comes back.
+The authorization decision is a line of Python -- `list_orders_for(user.id)` --
+correct only for as long as every tool passes the caller's id and nothing else.
+`src/databricks.py` is the same identity path with that decision moved out of
+the process entirely.
 """
 
 from __future__ import annotations
@@ -32,9 +27,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from src.obo import GRAPH_SCOPE, OboExchange
 
-# The single source of truth for these names. `src/chat.py` passes them to the
-# agent as its allow-list and the tests import them, so a tool renamed here
-# cannot silently drop out of either.
+# The single source of truth for these names: `src/chat.py` passes them to the
+# agent as its allow-list and the tests import them.
 ORDER_TOOLS = frozenset(
     {"who_am_i", "list_orders", "get_order", "create_order", "update_order_status"}
 )
@@ -127,10 +121,10 @@ def list_orders_for(owner_id: str) -> list[Order]:
 
 
 def get_order_for(owner_id: str, order_id: str) -> Order:
-    try:
-        return _orders[owner_id][order_id]
-    except KeyError:
-        raise ValueError("Order not found") from None
+    order = _orders[owner_id].get(order_id)
+    if order is None:
+        raise ValueError("Order not found")
+    return order
 
 
 def update_order_status_for(
@@ -163,17 +157,14 @@ def register(mcp: FastMCP, exchange: OboExchange) -> None:
     client = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5))
 
     async def current_user(access_token: AccessToken) -> GraphUser:
-        # FastMCP ships an EntraOBOToken dependency, but it only resolves when
-        # the server's auth provider is, or wraps, an AzureProvider — FastMCP's
-        # OAuth proxy, which mounts /authorize, /token, dynamic client
-        # registration and a consent screen. This server is purely a resource
-        # server sitting behind a pre-registered confidential client, so it
-        # needs none of that, and a secretless AzureProvider still demands a
-        # jwt_signing_key. Running the exchange here keeps the deployment at
-        # one route and no secrets.
+        # FastMCP's EntraOBOToken dependency only resolves when the auth
+        # provider is, or wraps, an AzureProvider -- its OAuth proxy, with
+        # /authorize, /token, dynamic client registration and a consent screen.
+        # This server is a resource server behind a pre-registered confidential
+        # client, so it needs none of that, and a secretless AzureProvider still
+        # demands a jwt_signing_key.
         #
-        # Every tool goes through here, so no tool can read data for anyone but
-        # the caller.
+        # Every tool goes through here, so no tool can read anyone else's data.
         graph_token = await exchange.token(access_token.token, GRAPH_SCOPE)
         response = await client.get(
             "https://graph.microsoft.com/v1.0/me",

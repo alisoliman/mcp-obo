@@ -2,15 +2,13 @@
 
 Bicep stops at the workspace. Metastores are an *account*-level Databricks
 concept, and catalogs, tables, warehouses, grants, row filters and column masks
-are all workspace-level REST or SQL. This script covers that gap and is the
-only imperative step in the deployment.
+are all workspace-level REST or SQL. This script covers that gap and is the only
+imperative step in the deployment.
 
-It runs as the deploying user through `AzureCliCredential`, and it is
-idempotent: every step checks for what it is about to create, and the demo
-tables are dropped and rebuilt so a re-run always lands on known seed data.
-
-What it deliberately does *not* do is grant anything to the MCP server's own
-identity. The server reaches this data only while holding a caller's token.
+It runs as the deploying user through `AzureCliCredential` and is idempotent:
+the demo tables are dropped and rebuilt so a re-run lands on known seed data. It
+grants nothing to the MCP server's own identity -- the server reaches this data
+only while holding a caller's token.
 """
 
 from __future__ import annotations
@@ -24,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from azure.core.exceptions import ClientAuthenticationError
 from azure.identity import AzureCliCredential
 
 from src.obo import DATABRICKS_SCOPE
@@ -61,9 +60,6 @@ class Config:
             host=required("DATABRICKS_HOST").rstrip("/"),
             workspace_name=env("DATABRICKS_WORKSPACE_NAME"),
             workspace_resource_id=env("DATABRICKS_WORKSPACE_RESOURCE_ID"),
-            # Preferred name. If the metastore has no storage root the bootstrap
-            # falls back to the catalog Databricks created with the workspace,
-            # and reports which one it settled on.
             catalog=required("DATABRICKS_CATALOG"),
             schema=required("DATABRICKS_SCHEMA"),
             warehouse_name=required("DATABRICKS_WAREHOUSE_NAME"),
@@ -79,13 +75,11 @@ class Databricks:
     ) -> None:
         headers = {"Authorization": f"Bearer {token}"}
         if arm_token and workspace_resource_id:
-            # An Entra token alone is not enough to reach a workspace: the
-            # identity has to exist in it, and a fresh workspace only knows
-            # whoever created it. These two headers let anyone holding
-            # Owner or Contributor on the workspace resource act as a workspace
-            # admin, and provision themselves on first call. Without them the
-            # bootstrap fails with "Unauthorized access to Org" for a user who
-            # has simply never signed in to Databricks.
+            # An Entra token alone is not enough: the identity has to exist in
+            # the workspace, and a fresh one only knows whoever created it.
+            # These headers let anyone with Owner or Contributor on the
+            # workspace resource provision themselves on first call. Without
+            # them the bootstrap fails with "Unauthorized access to Org".
             headers["X-Databricks-Azure-SP-Management-Token"] = arm_token
             headers["X-Databricks-Azure-Workspace-Resource-Id"] = workspace_resource_id
         self._client = httpx.Client(timeout=TIMEOUT, headers=headers)
@@ -118,24 +112,18 @@ class Databricks:
 
 
 def log(message: str) -> None:
-    # Progress goes to stderr so `--print-env` leaves stdout clean enough to
-    # pipe straight into `azd env set`.
+    # stderr, so `--print-env` leaves stdout clean enough to pipe into
+    # `azd env set`.
     print(f"  {message}", file=sys.stderr, flush=True)
-
-
-# --------------------------------------------------------------------------
-# Metastore
-# --------------------------------------------------------------------------
 
 
 def ensure_metastore(api: Databricks, config: Config) -> None:
     """Confirm a Unity Catalog metastore is assigned.
 
-    On Azure the answer is "already assigned": one is auto-provisioned with the
-    first workspace in a region, which is why this accelerator needs no
-    Databricks account administrator. Creating one is an account-level
-    operation, so a tenant with that automatic assignment switched off has to
-    do it by hand before running this.
+    On Azure one is auto-provisioned with the first workspace in a region, which
+    is why this accelerator needs no Databricks account administrator. Creating
+    one is an account-level operation, so a tenant with that automatic
+    assignment switched off has to do it by hand before running this.
     """
     current = api.call(
         "GET",
@@ -163,11 +151,10 @@ def ensure_metastore(api: Databricks, config: Config) -> None:
 def ensure_catalog(api: Databricks, config: Config) -> str:
     """Return a catalog to build the demo in, preferring the requested name.
 
-    Azure auto-provisions a metastore with each new workspace, but that
-    metastore has no storage root of its own -- Databricks holds the storage
-    behind "Default Storage" instead. A plain CREATE CATALOG therefore fails
-    with INVALID_STATE unless you name a location. Rather than demand that every
-    customer bring an ADLS container just to run a demo, this falls back to the
+    The metastore Azure auto-provisions has no storage root of its own --
+    Databricks holds the storage behind "Default Storage" instead -- so a plain
+    CREATE CATALOG fails with INVALID_STATE unless you name a location. Rather
+    than demand an ADLS container just to run a demo, this falls back to the
     managed catalog Databricks already created alongside the workspace.
     """
     uc = f"{config.host}/api/2.1/unity-catalog"
@@ -196,8 +183,7 @@ def ensure_catalog(api: Databricks, config: Config) -> str:
     ]
     if managed:
         # Databricks names the workspace's own catalog after the workspace, so
-        # prefer that over whichever happens to sort first — seeding into an
-        # unrelated team's catalog because of list ordering would be rude.
+        # prefer that over whichever happens to sort first.
         expected = config.workspace_name.replace("-", "_").lower()
         name = next((c for c in managed if c.lower() == expected), managed[0])
         log(
@@ -213,11 +199,6 @@ def ensure_catalog(api: Databricks, config: Config) -> str:
     )
 
 
-# --------------------------------------------------------------------------
-# SQL warehouse
-# --------------------------------------------------------------------------
-
-
 def ensure_warehouse(api: Databricks, config: Config) -> str:
     listed = api.call("GET", f"{config.host}/api/2.0/sql/warehouses")
     for warehouse in listed.get("warehouses", []):
@@ -231,7 +212,6 @@ def ensure_warehouse(api: Databricks, config: Config) -> str:
         "cluster_size": "2X-Small",
         "min_num_clusters": 1,
         "max_num_clusters": 1,
-        # Short auto-stop: this is a demo warehouse, not a service.
         "auto_stop_mins": 10,
         "warehouse_type": "PRO",
         "enable_serverless_compute": True,
@@ -271,11 +251,6 @@ def start_warehouse(api: Databricks, config: Config, warehouse_id: str) -> str:
             raise BootstrapError(f"warehouse entered {state} while starting")
         time.sleep(10)
     raise BootstrapError("warehouse did not reach RUNNING within 10 minutes")
-
-
-# --------------------------------------------------------------------------
-# SQL
-# --------------------------------------------------------------------------
 
 
 def run_sql(
@@ -323,10 +298,9 @@ def demo_owners(user: str) -> list[str]:
     """Who the seeded orders belong to.
 
     The bootstrapping user always comes first. `DATABRICKS_DEMO_OWNERS` adds
-    further real sign-ins, which is what turns the isolation story from a claim
-    into something two people can watch happen: both run the identical query and
-    get different rows. A synthetic owner is always appended so there is a row
-    the caller cannot see even when only one real user is seeded.
+    further real sign-ins, so two people can run the identical query and get
+    different rows. A synthetic owner is always appended so there is a row the
+    caller cannot see even when only one real user is seeded.
     """
     owners = [user]
     seen = {user.lower()}
@@ -351,11 +325,9 @@ def seed(
         run_sql(api, config, warehouse_id, statement)
 
     sql(f"CREATE SCHEMA IF NOT EXISTS {qualified}")
-    # Unity Catalog privileges are separate from workspace admin. A schema
+    # Unity Catalog privileges are separate from workspace admin: a schema
     # created by one operator cannot be rebuilt by another until ownership
-    # moves, which is what makes a second person's `azd up` fail with
-    # PERMISSION_DENIED on CREATE FUNCTION. Claiming it is harmless when the
-    # caller already owns it.
+    # moves. Claiming it is harmless when the caller already owns it.
     try:
         sql(f"ALTER SCHEMA {qualified} OWNER TO `{user}`")
     except BootstrapError as error:
@@ -363,8 +335,7 @@ def seed(
     log(f"schema ready: {qualified}")
 
     # Dropping first detaches any existing filter and mask, so the functions can
-    # be replaced. Rebuilding from scratch also keeps the row counts the
-    # end-to-end harness asserts on exactly right.
+    # be replaced.
     sql(f"DROP TABLE IF EXISTS {orders}")
 
     sql(
@@ -373,8 +344,7 @@ def seed(
     )
     # Unconditional on purpose. A real deployment would exempt a group here --
     # `CASE WHEN is_account_group_member('auditors') THEN email ELSE ... END` --
-    # but creating an account-level group needs a Databricks account admin, and
-    # this accelerator deliberately requires none.
+    # but creating an account-level group needs a Databricks account admin.
     sql(
         f"CREATE OR REPLACE FUNCTION {mask}(email STRING) RETURNS STRING "
         "RETURN concat('***@', split_part(email, '@', 2))"
@@ -418,18 +388,17 @@ def seed(
     sql(f"ALTER TABLE {orders} ALTER COLUMN customer_email SET MASK {mask}")
     log("row filter and column mask attached")
 
-    # Grants a non-admin consumer needs, applied for every seeded owner. The
-    # deployer is usually the catalog owner and already has these implicitly;
-    # they are stated so a customer can point the demo at a normal user and have
-    # it work unchanged.
+    # Grants a non-admin consumer needs. The deployer is usually the catalog
+    # owner and already has these implicitly; they are stated so a customer can
+    # point the demo at a normal user and have it work unchanged.
     sql(f"GRANT USE CATALOG ON CATALOG {catalog} TO `{user}`")
     sql(f"GRANT USE SCHEMA ON SCHEMA {qualified} TO `{user}`")
     sql(f"GRANT SELECT ON TABLE {orders} TO `{user}`")
     for owner in owners:
         if owner == user or owner.endswith("contoso.example"):
             continue
-        # Best effort: a listed owner who is not provisioned in this workspace
-        # cannot be granted, and that should not fail the bootstrap.
+        # A listed owner who is not provisioned in this workspace cannot be
+        # granted, and that should not fail the bootstrap.
         try:
             sql(f"GRANT USE CATALOG ON CATALOG {catalog} TO `{owner}`")
             sql(f"GRANT USE SCHEMA ON SCHEMA {qualified} TO `{owner}`")
@@ -472,7 +441,7 @@ def main() -> int:
             arm_token = credential.get_token(
                 "https://management.core.windows.net/.default"
             ).token
-        except Exception as error:  # noqa: BLE001 - best effort, not fatal
+        except ClientAuthenticationError as error:
             log(f"no ARM token ({error}); continuing without workspace elevation")
     api = Databricks(
         credential.get_token(DATABRICKS_SCOPE).token,
@@ -498,9 +467,8 @@ def main() -> int:
         api.close()
 
     # The catalog is echoed back because the fallback may have chosen a
-    # different one than was asked for, and the MCP server needs the real name.
-    # The seeded total is echoed because it varies with DATABRICKS_DEMO_OWNERS,
-    # and the harness asserts the caller sees strictly fewer rows than exist.
+    # different one than was asked for. The seeded totals vary with
+    # DATABRICKS_DEMO_OWNERS, and the harness asserts against them.
     resolved = {
         "DATABRICKS_WAREHOUSE_ID": warehouse_id,
         "DATABRICKS_CATALOG": catalog,
