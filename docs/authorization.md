@@ -34,6 +34,16 @@ This is the whole security design.
 Neither workload can reach user data on its own. The MCP server holds only
 *delegated* permissions, which are inert without a caller.
 
+That separation is real at the Entra layer and only there. Both pods run in the
+`orders` namespace, and Kubernetes has no "may use this ServiceAccount"
+permission, so anyone who can create a pod in that namespace can mount the MCP
+server's projected token and become the MCP workload as far as Entra is
+concerned. Namespace RBAC is what keeps these three apart on the cluster.
+
+The session holding the user's MSAL cache is renewed at sign-in, expires after
+30 minutes idle or 8 hours from sign-in, and exists only in that one chat pod's
+memory.
+
 ## What is actually on the wire
 
 Both modes make the identical request to Entra. One parameter differs:
@@ -69,7 +79,15 @@ application-only. Without a caller there is nothing to put there.
 for that resource", rather than naming scopes one at a time.
 
 In code this is `OboExchange.token(user_assertion, scope)` in
-[`src/obo.py`](../src/obo.py) — about twenty lines, no stored credential.
+[`src/obo.py`](../src/obo.py). The request above is a handful of arguments; the
+rest of that file is a per-caller credential cache and a typed Entra error. No
+credential is stored anywhere: the cache holds live credential objects in this
+process's memory, keyed by a hash of the caller's own token, dropped a minute
+before that token expires and evicted the moment Entra refuses it. So one tool
+call is not one round trip to Entra, and a downstream token cannot outlive the
+assertion it was minted for. It can outlive a revocation, though: nothing tells
+this process that Entra withdrew the caller's token early, so a cached entry
+serves until the next refusal evicts it.
 
 ## Three gates, three different deciders
 
@@ -84,6 +102,11 @@ the same name.
 
 No network call to Graph. Signing keys come from Entra's discovery document.
 
+A browser is also held to its `Origin`: everything except `/.well-known/` is
+refused unless the origin matches `MCP_SERVER_URL` or one listed in the optional
+`MCP_ALLOWED_ORIGINS`, which is what a browser-based MCP client on another
+origin would need. Nothing else sends an `Origin`, so nothing else is affected.
+
 ### Gate 2 — Entra decides whether to mint the downstream token
 
 This is the exchange itself, and the only gate Entra owns. It checks:
@@ -92,12 +115,24 @@ This is the exchange itself, and the only gate Entra owns. It checks:
 - the client assertion proves the app identity, via the federated credential
 - **the app holds a delegated permission to the target resource, and it has
   been consented**
-- conditional access and Continuous Access Evaluation policies
+- Conditional Access on the caller and on the target resource
 
 That bolded line is the one that matters most here. `infra/main.bicep` requests
 `user_impersonation` on Azure Databricks as `type: 'Scope'` — delegated — and
 never as `type: 'Role'`, which would be an application permission usable with no
 user present. A test compiles the template and asserts every entry is a `Scope`.
+
+Entra evaluates Conditional Access here; this application cannot act on the
+answer. A policy demanding a step-up comes back as a claims challenge, and
+satisfying one means relaying it: the server would have to answer `401` with a
+`WWW-Authenticate` carrying the claims, and the chat client would have to
+declare the `cp1` capability so Entra knows it can handle one. Neither is built,
+so a step-up is not recoverable inside this app. What is built is the diagnosis.
+`OboError` in `src/obo.py` keeps Entra's error code, the AADSTS numbers and the
+claims challenge, and reaches the user as a `ToolError` rather than being
+flattened by `mask_error_details` into an indistinguishable failure — so
+AADSTS50076 reads as the policy it is, and the user satisfies it out of band and
+signs in again.
 
 ### Gate 3 — the downstream resource decides what the token can do
 
@@ -130,6 +165,27 @@ The downstream service sees *"this is Ali, relayed by the MCP server"* — not
 *"this is the MCP server"*. That is why `current_user()` in a Databricks SQL
 warehouse returns a person's UPN, and why the audit log names a human.
 
+## Why a generic MCP client cannot sign in here
+
+The server half of the MCP authorization spec is implemented: `/mcp` serves RFC
+9728 protected resource metadata and answers an unauthenticated call with a
+`WWW-Authenticate` challenge carrying `resource_metadata`, so a client can
+discover which authorization server to go to. It still cannot finish, for two
+reasons that belong to Entra rather than to this repo:
+
+- The spec says a client MUST send the RFC 8707 `resource` parameter naming the
+  canonical MCP server URI. Entra does not implement resource indicators — the
+  audience comes from the scope, which here is
+  `api://<server-app-id>/Mcp.Tools.ReadWrite` and can never equal the server's
+  URL.
+- Entra's OIDC metadata omits `code_challenge_methods_supported`, and the spec
+  tells a client that finds it missing to refuse to proceed.
+
+So authorization here works only for clients registered against the server
+application in advance: the chat app, and the Azure CLI when
+`HARNESS_CLIENT_APP_ID` pre-authorizes it. Point a generic MCP client at `/mcp`
+and it fails during discovery, not at the token endpoint.
+
 ## Where Graph does legitimately appear
 
 `infra/main.bicep` is full of `Microsoft.Graph/applications` and
@@ -142,7 +198,9 @@ records.
 - **Request time:** Entra reads that record when deciding gate 2. Graph is not
   called.
 
-In databricks mode, Graph is never contacted at runtime at all.
+In databricks mode, Graph is never contacted at runtime at all — and the
+template requests no Graph permission and writes no Graph consent record in that
+mode either. The delegated `User.Read` exists in orders mode only.
 
 ## Reading it in the code
 

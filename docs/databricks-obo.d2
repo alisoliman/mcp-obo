@@ -85,7 +85,7 @@ query: {
     style.stroke: "#A4262C"
     style.stroke-width: 2
   }
-  uc -> uc: "row filter: owner_email = current_user()\ncolumn mask: customer_email" {
+  uc -> uc: "row filter: lower(owner_email) = lower(current_user())\ncolumn mask: customer_email" {
     style.stroke: "#A4262C"
   }
   uc -> warehouse: "only the caller's rows, email masked" {

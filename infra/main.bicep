@@ -40,8 +40,41 @@ delegated token with `az account get-access-token`. Nothing in the running
 system needs this.''')
 param harnessClientAppId string = ''
 
+@description('''Comma-separated object IDs of the users or groups allowed to sign
+in. Empty (the default) leaves both applications open to every account in the
+tenant, which is what Entra does by default and what a demo usually wants. Supply
+object IDs and both service principals flip to requiring an assignment, with the
+deploying user assigned as well so a locked-down deployment still admits its
+owner. The Databricks example names its two personas by UPN, which Bicep cannot
+resolve, so their object IDs go here if you use this. A comma-separated string
+rather than an array because that is what `azd env set` can carry. Nothing in the
+running system reads it: it changes who Entra will issue a token to, not how the
+code behaves.''')
+param allowedPrincipalIds string = ''
+
+@description('''Set to `true` to send the Databricks workspace's audit logs to a
+new Log Analytics workspace. Off by default because Log Analytics is billable and
+the README lists "no telemetry" among the deliberate limits, but the
+accelerator's central claim — that Unity Catalog sees the end user, not the MCP
+server, behind every query — is only checkable with this on. A string rather than
+a bool for the same reason as above. Ignored in orders mode.''')
+param enableDatabricksAuditLogs string = 'false'
+
 var suffix = uniqueString(subscription().id, resourceGroup().id, environmentName)
 var deployDatabricks = deploymentMode == 'databricks'
+var deployAuditLogs = deployDatabricks && toLower(enableDatabricksAuditLogs) == 'true'
+var requestedPrincipalIds = filter(
+  map(split(allowedPrincipalIds, ','), id => trim(id)),
+  id => !empty(id)
+)
+var restrictSignIn = !empty(requestedPrincipalIds)
+// The deployer is added unconditionally: an application that requires assignment
+// and has none is a deployment that locks out the person who ran it.
+var assignedPrincipalIds = union([principalId], requestedPrincipalIds)
+// Entra's well-known id for "assigned, but to no particular app role". Both
+// applications expose delegated scopes and no app roles, so this is the only
+// value an assignment can carry.
+var defaultAccessAppRoleId = '00000000-0000-0000-0000-000000000000'
 var aksName = take('aks-${environmentName}-${suffix}', 63)
 var acrName = 'acr${suffix}'
 var foundryName = take('foundry-${environmentName}-${suffix}', 64)
@@ -49,6 +82,8 @@ var foundryProjectName = take('${environmentName}-orders', 64)
 var namespaceName = 'orders'
 var serverServiceAccountName = 'fastmcp-orders'
 var clientServiceAccountName = 'order-agent-chat'
+var serverFederationSubject = 'system:serviceaccount:${namespaceName}:${serverServiceAccountName}'
+var clientFederationSubject = 'system:serviceaccount:${namespaceName}:${clientServiceAccountName}'
 var serverImageName = 'fastmcp-order-server'
 var clientImageName = 'order-agent-chat'
 var ingressPublicIpName = 'pip-${environmentName}-${suffix}'
@@ -75,6 +110,7 @@ var databricksManagedRgName = 'rg-${databricksWorkspaceName}-managed'
 var databricksCatalogName = toLower('mcp_obo_${suffix}')
 var databricksSchemaName = 'sales'
 var databricksWarehouseName = take('wh-${environmentName}-${suffix}', 64)
+var logAnalyticsName = take('log-${environmentName}-${suffix}', 63)
 var acrPullRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '7f951dda-4ed3-4680-a7ca-43fe172d538d'
@@ -124,6 +160,18 @@ resource ingressPublicIp 'Microsoft.Network/publicIPAddresses@2024-07-01' = {
 var appHost = ingressPublicIp.properties.dnsSettings.fqdn
 var appUrl = 'https://${appHost}'
 
+// There is deliberately no networkProfile, and therefore no network policy
+// engine: pod-to-pod traffic here is unrestricted and a NetworkPolicy shipped
+// against this cluster would be silently inert, which is worse than shipping
+// none. Turning an engine on is a create-time-only property, so adding it would
+// break `azd provision` over the clusters this template has already made, and it
+// costs a DaemonSet on a single Standard_B2s node that already carries
+// ingress-nginx, cert-manager and both workloads. It would also not close the
+// exposure it appears to: both workloads share the `orders` namespace, and
+// Kubernetes has no "may use this ServiceAccount" permission, so anyone who can
+// create a pod there mounts the MCP server's Entra client assertion directly and
+// never crosses the network. Namespace RBAC is the control — grant edit on
+// `orders` and you have granted the server's application identity.
 resource aks 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
   name: aksName
   location: location
@@ -283,6 +331,45 @@ resource databricks 'Microsoft.Databricks/workspaces@2024-05-01' = if (deployDat
   }
 }
 
+resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (deployAuditLogs) {
+  name: logAnalyticsName
+  location: location
+  properties: {
+    sku: {
+      name: 'PerGB2018'
+    }
+    retentionInDays: 30
+  }
+}
+
+// Azure Resource Logs are opt-in, so without this the audit trail the accelerator
+// talks about exists inside Databricks and is invisible to anyone running the
+// demo. `unityCatalog` carries the grant checks and the table access that the row
+// filter and the column mask act on, `databrickssql` carries the warehouse
+// statements themselves, and `accounts` carries the token exchange that put the
+// end user's identity there in the first place — which is the whole claim.
+resource databricksAudit 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (deployAuditLogs) {
+  name: 'audit-to-log-analytics'
+  scope: databricks
+  properties: {
+    workspaceId: logAnalytics.id
+    logs: [
+      {
+        category: 'unityCatalog'
+        enabled: true
+      }
+      {
+        category: 'databrickssql'
+        enabled: true
+      }
+      {
+        category: 'accounts'
+        enabled: true
+      }
+    ]
+  }
+}
+
 resource clientApp 'Microsoft.Graph/applications@v1.0' = {
   uniqueName: clientAppUniqueName
   displayName: '${environmentName} Order Agent Chat'
@@ -312,7 +399,12 @@ resource serverApp 'Microsoft.Graph/applications@v1.0' = {
     oauth2PermissionScopes: [
       {
         id: scopeId
-        type: 'User'
+        // Admin, not User. This scope is the only gate in front of a governed
+        // data path, and in a tenant that still allows user consent, any app a
+        // user can be talked into approving could self-consent to it. Nothing
+        // in this deployment needs user consent: the chat client is
+        // pre-authorized below and granted for all principals further down.
+        type: 'Admin'
         adminConsentDescription: 'Call the Order Handling MCP as the signed-in user.'
         adminConsentDisplayName: 'Call the Order Handling MCP'
         userConsentDescription: 'Call the Order Handling MCP as you.'
@@ -344,17 +436,22 @@ resource serverApp 'Microsoft.Graph/applications@v1.0' = {
     requestedAccessTokenVersion: 2
   }
   requiredResourceAccess: concat(
-    [
-      {
-        resourceAppId: graphAppId
-        resourceAccess: [
+    // Only orders mode ever calls Graph, and only to resolve the caller's own
+    // profile. A databricks-mode server talks to Databricks and nothing else, so
+    // it does not carry a tenant-consented Graph permission it would never use.
+    deployDatabricks
+      ? []
+      : [
           {
-            id: graphUserReadScopeId
-            type: 'Scope'
+            resourceAppId: graphAppId
+            resourceAccess: [
+              {
+                id: graphUserReadScopeId
+                type: 'Scope'
+              }
+            ]
           }
-        ]
-      }
-    ],
+        ],
     // Delegated only. There is deliberately no application permission here, so
     // this server cannot reach Databricks except while holding a caller's
     // token — the same property the Graph permission above gives it. A test
@@ -408,22 +505,50 @@ resource clientAppUpdate 'Microsoft.Graph/applications@v1.0' = {
   ]
 }
 
+// Without `appRoleAssignmentRequired`, Entra makes an application available to
+// every user in the tenant who authenticates — so in a large tenant, everyone can
+// open APP_URL and start a session. Unity Catalog still stops them at the data,
+// but not at the model: the chat app authenticates Foundry with its own workload
+// identity, so an unassigned visitor spends the deployment's token quota. Left
+// off by default because that is Entra's own default and a demo usually wants it;
+// supplying `allowedPrincipalIds` closes it for both applications at once.
 resource serverServicePrincipal 'Microsoft.Graph/servicePrincipals@v1.0' = {
   appId: serverApp.appId
+  appRoleAssignmentRequired: restrictSignIn
 }
 
 resource clientServicePrincipal 'Microsoft.Graph/servicePrincipals@v1.0' = {
   appId: clientApp.appId
+  appRoleAssignmentRequired: restrictSignIn
 }
 
-resource graphServicePrincipal 'Microsoft.Graph/servicePrincipals@v1.0' existing = {
+resource clientAppAssignments 'Microsoft.Graph/appRoleAssignedTo@v1.0' = [
+  for id in assignedPrincipalIds: if (restrictSignIn) {
+    appRoleId: defaultAccessAppRoleId
+    principalId: id
+    resourceId: clientServicePrincipal.id
+  }
+]
+
+// The API needs the same assignments as the front end: when a resource requires
+// assignment, Entra refuses to issue a token for it to an unassigned user, and
+// that refusal lands at the point the chat client asks for the MCP scope.
+resource serverAppAssignments 'Microsoft.Graph/appRoleAssignedTo@v1.0' = [
+  for id in assignedPrincipalIds: if (restrictSignIn) {
+    appRoleId: defaultAccessAppRoleId
+    principalId: id
+    resourceId: serverServicePrincipal.id
+  }
+]
+
+resource graphServicePrincipal 'Microsoft.Graph/servicePrincipals@v1.0' existing = if (!deployDatabricks) {
   appId: graphAppId
 }
 
-resource graphAdminConsent 'Microsoft.Graph/oauth2PermissionGrants@v1.0' = {
+resource graphAdminConsent 'Microsoft.Graph/oauth2PermissionGrants@v1.0' = if (!deployDatabricks) {
   clientId: serverServicePrincipal.id
   consentType: 'AllPrincipals'
-  resourceId: graphServicePrincipal.id
+  resourceId: graphServicePrincipal!.id
   scope: 'User.Read'
 }
 
@@ -445,6 +570,13 @@ resource mcpAdminConsent 'Microsoft.Graph/oauth2PermissionGrants@v1.0' = {
   scope: scopeValue
 }
 
+// The subject is the single string that binds this credential to one pod, and
+// Entra accepts a wrong one without complaint: the failure surfaces later, as a
+// masked tool error, when the token exchange is refused. Bicep derives it from
+// the same two variables the MCP_SERVICE_ACCOUNT_NAME and AZURE_AKS_NAMESPACE
+// outputs publish, but k8s/mcp/serviceaccount.yaml (metadata.name),
+// k8s/mcp/kustomization.yaml (namespace) and azure.yaml (services.mcp.k8s) all
+// restate it in YAML, and nothing at deploy time checks that they agree.
 resource serverWorkloadFederation 'Microsoft.Graph/applications/federatedIdentityCredentials@v1.0' = {
   name: '${serverApp.uniqueName}/aks-workload'
   audiences: [
@@ -452,9 +584,10 @@ resource serverWorkloadFederation 'Microsoft.Graph/applications/federatedIdentit
   ]
   description: 'AKS service account credential for the FastMCP server'
   issuer: aks.properties.oidcIssuerProfile.issuerURL
-  subject: 'system:serviceaccount:${namespaceName}:${serverServiceAccountName}'
+  subject: serverFederationSubject
 }
 
+// Same restatement, in k8s/chat/serviceaccount.yaml and k8s/chat/kustomization.yaml.
 resource clientWorkloadFederation 'Microsoft.Graph/applications/federatedIdentityCredentials@v1.0' = {
   name: '${clientApp.uniqueName}/aks-workload'
   audiences: [
@@ -462,7 +595,7 @@ resource clientWorkloadFederation 'Microsoft.Graph/applications/federatedIdentit
   ]
   description: 'AKS service account credential for the Order Agent chat client'
   issuer: aks.properties.oidcIssuerProfile.issuerURL
-  subject: 'system:serviceaccount:${namespaceName}:${clientServiceAccountName}'
+  subject: clientFederationSubject
 }
 
 resource clientFoundryAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -483,6 +616,11 @@ output AZURE_SUBSCRIPTION_ID string = subscription().subscriptionId
 output AZURE_TENANT_ID string = tenant().tenantId
 output AZURE_AKS_CLUSTER_NAME string = aks.name
 output AZURE_AKS_NAMESPACE string = namespaceName
+// Published so the YAML that restates these — the ServiceAccount manifests, the
+// kustomizations and azure.yaml — can be checked against the federated identity
+// subjects rather than trusted to match them.
+output MCP_SERVICE_ACCOUNT_NAME string = serverServiceAccountName
+output CHAT_SERVICE_ACCOUNT_NAME string = clientServiceAccountName
 output AZURE_CONTAINER_REGISTRY_NAME string = acr.name
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = acr.properties.loginServer
 output MCP_IMAGE_NAME string = serverImageName
