@@ -150,16 +150,14 @@ class OrderTests(unittest.TestCase):
 
 class McpServerTests(unittest.TestCase):
     def test_server_requires_user_scope_and_exposes_only_order_tools(self) -> None:
-        # DATABRICKS_HOST is cleared explicitly: the Databricks tools register
-        # themselves off it, so a developer with the workspace configured in
-        # their shell would otherwise see this test fail for the wrong reason.
+        # Cleared explicitly: the Databricks tools register themselves off
+        # DATABRICKS_HOST, so a developer with a workspace in their shell would
+        # see this fail for the wrong reason.
         environment = dict(MCP_ENVIRONMENT, DATABRICKS_HOST="")
         with patch.dict("os.environ", environment, clear=False):
             mcp = server.create_server()
             tools = asyncio.run(mcp.list_tools())
 
-        # The chat client passes ORDER_TOOLS as `allowed_tools`, so a tool added
-        # on one side and not the other would silently never be callable.
         self.assertEqual({tool.name for tool in tools}, ORDER_TOOLS)
         self.assertEqual(
             mcp.auth.token_verifier.required_scopes, ["Mcp.Tools.ReadWrite"]
@@ -191,11 +189,10 @@ class McpServerTests(unittest.TestCase):
 class DatabricksToolTests(unittest.TestCase):
     """Databricks mode, checked without a workspace.
 
-    What a unit test can prove here is narrow but worth pinning: the mode
-    selects the right tools, the query is not assembled from caller input, and
-    the Entra permission is delegated rather than application. Whether Unity
-    Catalog actually filters rows is a deployment fact, checked by the
-    end-to-end harness in `test_databricks_e2e.py`.
+    What a unit test can prove here is narrow: the mode selects the right tools,
+    the query is not assembled from caller input, and the Entra permission is
+    delegated rather than application. Whether Unity Catalog actually filters
+    rows is a deployment fact, checked by `test_databricks_e2e.py`.
     """
 
     def test_databricks_mode_replaces_the_order_tools(self) -> None:
@@ -207,12 +204,9 @@ class DatabricksToolTests(unittest.TestCase):
             tools = asyncio.run(mcp.list_tools())
             allowed = allowed_tools()
 
-        # The modes are alternatives, not layers: databricks mode serves the
-        # Databricks tools and nothing else.
+        # The modes are alternatives, not layers.
         self.assertEqual({tool.name for tool in tools}, set(DATABRICKS_TOOLS))
         self.assertEqual({tool.name for tool in tools} & set(ORDER_TOOLS), set())
-        # And the chat's allow-list follows the same mode, so a tool on the
-        # server is always reachable from the UI and vice versa.
         self.assertEqual(allowed, DATABRICKS_TOOLS)
         for tool in tools:
             self.assertNotIn("access_token", tool.parameters.get("properties", {}))
@@ -308,11 +302,10 @@ class DatabricksToolTests(unittest.TestCase):
         )
 
     def test_no_application_permission_is_ever_requested(self) -> None:
-        # Compiled, not grepped. `type: 'Role'` is how a Bicep resourceAccess
-        # entry asks for an application permission — one that works with no user
-        # present — and the whole accelerator rests on there being none, for
-        # Graph or for Databricks. Asserting against the ARM JSON means a
-        # rename or a refactor cannot quietly turn this green.
+        # `type: 'Role'` is how a Bicep resourceAccess entry asks for an
+        # application permission -- one that works with no user present -- and
+        # the whole accelerator rests on there being none. Asserting against the
+        # compiled ARM JSON means a rename cannot quietly turn this green.
         compiled = subprocess.run(
             ["az", "bicep", "build", "--file", str(ROOT / "infra" / "main.bicep"),
              "--stdout"],
@@ -335,8 +328,8 @@ class DatabricksToolTests(unittest.TestCase):
                 resource.get("properties", {}).get("requiredResourceAccess") or []
             )
             # Some entries are ARM expression strings that copy another
-            # application's list verbatim — the list itself is checked where it
-            # is declared, so following the reference would only double-count.
+            # application's list verbatim; following the reference would only
+            # double-count what is already checked where it is declared.
             if isinstance(required, dict)
             for access in (required.get("resourceAccess") or [])
         ]
@@ -346,9 +339,8 @@ class DatabricksToolTests(unittest.TestCase):
                 access.get("type"), "Scope", f"application permission found: {access}"
             )
 
-        # And the delegated Databricks permission is the one actually asked for.
-        # Permission ids compile to variable references, so the value is checked
-        # where the compiler resolved it.
+        # Permission ids compile to variable references, so the delegated
+        # Databricks permission is checked where the compiler resolved it.
         self.assertEqual(
             template["variables"]["databricksUserImpersonationScopeId"],
             "739272be-e143-11e8-9f32-f2801f1b9fd1",
@@ -522,12 +514,11 @@ class ChatTests(unittest.TestCase):
                 "message": "safe",
             },
         )
-        # Agent text is never truncated on its way to the transcript, unlike
-        # the tool payloads that `_safe_event_value` caps.
+        # Agent text is never truncated on its way to the transcript, unlike the
+        # tool payloads that `_safe_event_value` caps.
         long_text = "x" * 5_000
         self.assertIn(long_text, _sse_text_event("response.delta", long_text))
-        # FastMCP returns one text block per content item; identical blocks
-        # should collapse to a single parsed result rather than a list.
+        # Identical text blocks collapse to a single parsed result.
         duplicate_result = [
             SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
             SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
@@ -586,10 +577,8 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(session_payload["profile"]["name"], "Ada")
                 self.assertEqual(session_payload["model"], "gpt-5.6-terra")
                 self.assertEqual(session_payload["mode"], server.current_mode())
-                # Derived from allowed_tools() rather than restated, so wiring a new
-                # tool into the agent updates this in one place. The order
-                # tools are named explicitly as well, so the Graph half of the
-                # demo cannot quietly disappear from the UI.
+                # The order tools are named explicitly as well, so the Graph
+                # half of the demo cannot quietly disappear from the UI.
                 self.assertEqual(
                     session_payload["mcp"]["tools"],
                     sorted(allowed_tools()),
@@ -643,9 +632,6 @@ class ChatTests(unittest.TestCase):
             {
                 "authenticated": False,
                 "model": "gpt-5.6-terra",
-                # The browser is told the mode so it can name the downstream
-                # resource truthfully. Claiming Microsoft Graph in a databricks
-                # deployment would contradict docs/authorization.md.
                 "mode": "orders",
                 "mcp": {"tools": sorted(allowed_tools())},
             },

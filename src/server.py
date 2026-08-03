@@ -13,14 +13,9 @@ Everything identity-related happens here, and it is the same in both modes:
     orders      -> src/orders.py      -> Microsoft Graph
     databricks  -> src/databricks.py  -> Azure Databricks + Unity Catalog
 
-The two are alternatives, not layers. Each mode is a complete example on its
-own, so a reader follows exactly one path. Adding a third resource means adding
-a module with a `register` function and one line below -- see docs/authorization.md
-for why the exchange is the only part that has to be shared.
-
-Neither mode has an application-permission path to its data. Without a caller
-there is nothing to exchange, and both `Graph /me` and Databricks
-`current_user()` are meaningless outside user context.
+The two are alternatives, not layers, so a reader follows exactly one path.
+Neither has an application-permission path to its data: without a caller there
+is nothing to exchange.
 """
 
 from __future__ import annotations
@@ -95,9 +90,8 @@ def create_server() -> FastMCP:
     )
 
     def workload_assertion() -> str:
-        # AKS Workload Identity projects a short-lived signed token for this
-        # pod's service account. It takes the place of a client secret, which
-        # is why no credential is stored anywhere in this deployment.
+        # AKS projects a short-lived signed token for this pod's service
+        # account. It stands in for a client secret, so none is stored anywhere.
         assertion = token_file.read_text(encoding="utf-8").strip()
         if not assertion:
             raise RuntimeError("The projected workload identity token is empty")

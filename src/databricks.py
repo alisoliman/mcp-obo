@@ -1,14 +1,13 @@
 """Databricks tools reached through the same delegated token as the Graph ones.
 
-Nothing here decides who may see what. That is the entire point: the SQL below
-is a fixed literal, the only variable parts are bound parameters, and the token
-carried into Databricks is the caller's. Unity Catalog applies the row filter,
-the column mask, and the table grants, and Databricks writes the caller's name
--- not this server's -- into its audit log.
+Nothing here decides who may see what. The SQL below is a fixed literal, the
+only variable parts are bound parameters, and the token carried into Databricks
+is the caller's. Unity Catalog applies the row filter, the column mask and the
+table grants, and Databricks writes the caller's name -- not this server's --
+into its audit log.
 
 `src/orders.py` is the same identity path with the decision left inside the
-process. Compare the two `register` functions: they differ in the scope they ask
-Entra for, and in who decides what comes back.
+process.
 """
 
 from __future__ import annotations
@@ -28,15 +27,13 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from src.obo import DATABRICKS_SCOPE, OboExchange
 
-# Unity Catalog identifiers are operator-supplied, never model-supplied, but
-# they are still interpolated into SQL text, so they are held to the characters
-# Databricks allows in an unquoted identifier. `str.isalnum` is not a substitute:
-# it accepts non-ASCII letters and digits such as "½".
+# Operator-supplied identifiers are still interpolated into SQL text, so they
+# are held to the characters Databricks allows unquoted. `str.isalnum` is not a
+# substitute: it accepts non-ASCII digits such as "½".
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_]{1,128}$")
 
-# The single source of truth for these tool names. `src/chat.py` holds the
-# equivalent ORDER_TOOLS, and the tests import both rather than restating them,
-# so a tool renamed on one side cannot silently drift from the other.
+# The single source of truth for these tool names; `src/chat.py` holds the
+# equivalent ORDER_TOOLS and the tests import both.
 DATABRICKS_TOOLS = frozenset(
     {"databricks_whoami", "databricks_list_tables", "databricks_query_orders"}
 )
@@ -109,8 +106,6 @@ class DatabricksSettings:
             catalog=required("DATABRICKS_CATALOG"),
             schema_name=required("DATABRICKS_SCHEMA"),
         )
-        # Validated here rather than by the caller, so a DatabricksSettings
-        # cannot exist in an unchecked state.
         for name, value in (
             ("DATABRICKS_CATALOG", settings.catalog),
             ("DATABRICKS_SCHEMA", settings.schema_name),
@@ -134,9 +129,8 @@ async def _request(
     params: dict[str, Any] | None = None,
     json: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    # The client is shared and holds no credential — the token rides in a
-    # per-request header — so reusing it keeps the TLS connection warm without
-    # any risk of one caller's identity leaking into another's request.
+    # The shared client holds no credential -- the token rides in a per-request
+    # header -- so no caller's identity can leak into another's request.
     response = await client.request(
         method,
         f"{settings.host}{path}",
@@ -146,9 +140,9 @@ async def _request(
     )
 
     if response.status_code >= 400:
-        # Surfaced deliberately. A Unity Catalog denial is the demonstration,
-        # not an incident, so the caller is told what Databricks decided.
-        # Databricks error bodies carry no token material.
+        # A Unity Catalog denial is the demonstration, not an incident, so the
+        # caller is told what Databricks decided. Its error bodies carry no
+        # token material.
         detail = response.text[:400]
         raise ToolError(f"Databricks returned {response.status_code}: {detail}")
     return response.json()
@@ -196,9 +190,8 @@ def _rows_from(body: dict[str, Any]) -> tuple[list[str], list[list[str | None]]]
 def orders_statement(table: str) -> str:
     """The only statement this server will ever run against the orders table.
 
-    Fixed text. The caller influences it through bound parameters and nothing
-    else, so there is no arrangement of tool arguments that reshapes the query.
-    Even if there were, the row filter would still apply.
+    Fixed text: the caller influences it through bound parameters and nothing
+    else. Even if they could reshape it, the row filter would still apply.
     """
     return (
         "SELECT current_user() AS ran_as, order_id, owner_email, region, "
@@ -224,9 +217,6 @@ def register(
 ) -> None:
     """Attach the Databricks tools to an already-authenticated MCP server."""
 
-    # One client for the process. It carries no credential, so sharing it costs
-    # nothing in isolation and saves a TLS handshake plus an SSL context build
-    # on every tool call.
     client = httpx.AsyncClient(timeout=_TIMEOUT)
 
     async def databricks_token(access_token: AccessToken) -> str:
@@ -238,10 +228,9 @@ def register(
     ) -> DatabricksIdentity:
         """Show which identity Databricks resolved for the signed-in user."""
         token = await databricks_token(access_token)
-        # SCIM answers from the control plane and current_user() answers from
-        # the SQL warehouse. Agreeing means the delegated identity survived both
-        # hops, not just the first. Neither depends on the other, so they run
-        # together.
+        # SCIM answers from the control plane, current_user() from the SQL
+        # warehouse. Agreeing means the delegated identity survived both hops,
+        # not just the first.
         me, body = await asyncio.gather(
             _request(client, settings, token, "GET", "/api/2.0/preview/scim/v2/Me"),
             _run_statement(client, settings, token, "SELECT current_user()"),
@@ -289,8 +278,8 @@ def register(
     ) -> QueryResult:
         """Query the Unity Catalog orders table as the signed-in user.
 
-        Unity Catalog applies the row filter and column mask, so the rows this
-        returns are already scoped to the caller before the server sees them.
+        Unity Catalog applies the row filter and column mask, so the rows are
+        already scoped to the caller before the server sees them.
         """
         token = await databricks_token(access_token)
         statement = orders_statement(settings.orders_table)
@@ -304,8 +293,8 @@ def register(
         )
         columns, rows = _rows_from(body)
 
-        # `ran_as` rides along on every row so a result is self-proving, but it
-        # is lifted out of the tabular data rather than repeated to the reader.
+        # `ran_as` rides along on every row so a result is self-proving, then is
+        # lifted out rather than repeated to the reader.
         ran_as = rows[0][0] if rows and rows[0] else None
         return QueryResult(
             columns=tuple(columns[1:]),
