@@ -213,16 +213,14 @@ class OrderTests(unittest.TestCase):
 
 class McpServerTests(unittest.TestCase):
     def test_server_requires_user_scope_and_exposes_only_order_tools(self) -> None:
-        # DATABRICKS_HOST is cleared explicitly: the Databricks tools register
-        # themselves off it, so a developer with the workspace configured in
-        # their shell would otherwise see this test fail for the wrong reason.
+        # Cleared explicitly: the Databricks tools register themselves off
+        # DATABRICKS_HOST, so a developer with a workspace in their shell would
+        # see this fail for the wrong reason.
         environment = dict(MCP_ENVIRONMENT, DATABRICKS_HOST="")
         with patch.dict("os.environ", environment, clear=False):
             mcp = server.create_server()
             tools = asyncio.run(mcp.list_tools())
 
-        # The chat client passes ORDER_TOOLS as `allowed_tools`, so a tool added
-        # on one side and not the other would silently never be callable.
         self.assertEqual({tool.name for tool in tools}, ORDER_TOOLS)
         self.assertEqual(
             mcp.auth.token_verifier.required_scopes, ["Mcp.Tools.ReadWrite"]
@@ -603,11 +601,10 @@ class OboExchangeTests(unittest.TestCase):
 class DatabricksToolTests(unittest.TestCase):
     """Databricks mode, checked without a workspace.
 
-    What a unit test can prove here is narrow but worth pinning: the mode
-    selects the right tools, the query is not assembled from caller input, and
-    the Entra permission is delegated rather than application. Whether Unity
-    Catalog actually filters rows is a deployment fact, checked by the
-    end-to-end harness in `test_databricks_e2e.py`.
+    What a unit test can prove here is narrow: the mode selects the right tools,
+    the query is not assembled from caller input, and the Entra permission is
+    delegated rather than application. Whether Unity Catalog actually filters
+    rows is a deployment fact, checked by `test_databricks_e2e.py`.
     """
 
     def test_databricks_mode_replaces_the_order_tools(self) -> None:
@@ -619,12 +616,9 @@ class DatabricksToolTests(unittest.TestCase):
             tools = asyncio.run(mcp.list_tools())
             allowed = allowed_tools()
 
-        # The modes are alternatives, not layers: databricks mode serves the
-        # Databricks tools and nothing else.
+        # The modes are alternatives, not layers.
         self.assertEqual({tool.name for tool in tools}, set(DATABRICKS_TOOLS))
         self.assertEqual({tool.name for tool in tools} & set(ORDER_TOOLS), set())
-        # And the chat's allow-list follows the same mode, so a tool on the
-        # server is always reachable from the UI and vice versa.
         self.assertEqual(allowed, DATABRICKS_TOOLS)
         for tool in tools:
             self.assertNotIn("access_token", tool.parameters.get("properties", {}))
@@ -1114,12 +1108,11 @@ class ChatTests(unittest.TestCase):
                 "message": "safe",
             },
         )
-        # Agent text is never truncated on its way to the transcript, unlike
-        # the tool payloads that `_safe_event_value` caps.
+        # Agent text is never truncated on its way to the transcript, unlike the
+        # tool payloads that `_safe_event_value` caps.
         long_text = "x" * 5_000
         self.assertIn(long_text, _sse_text_event("response.delta", long_text))
-        # FastMCP returns one text block per content item; identical blocks
-        # should collapse to a single parsed result rather than a list.
+        # Identical text blocks collapse to a single parsed result.
         duplicate_result = [
             SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
             SimpleNamespace(type="text", text='{"display_name":"Ada"}'),
@@ -1178,10 +1171,8 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(session_payload["profile"]["name"], "Ada")
                 self.assertEqual(session_payload["model"], "gpt-5.6-terra")
                 self.assertEqual(session_payload["mode"], server.current_mode())
-                # Derived from allowed_tools() rather than restated, so wiring a new
-                # tool into the agent updates this in one place. The order
-                # tools are named explicitly as well, so the Graph half of the
-                # demo cannot quietly disappear from the UI.
+                # The order tools are named explicitly as well, so the Graph
+                # half of the demo cannot quietly disappear from the UI.
                 self.assertEqual(
                     session_payload["mcp"]["tools"],
                     sorted(allowed_tools()),
@@ -1240,9 +1231,6 @@ class ChatTests(unittest.TestCase):
             {
                 "authenticated": False,
                 "model": "gpt-5.6-terra",
-                # The browser is told the mode so it can name the downstream
-                # resource truthfully. Claiming Microsoft Graph in a databricks
-                # deployment would contradict docs/authorization.md.
                 "mode": "orders",
                 "mcp": {"tools": sorted(allowed_tools())},
             },

@@ -1,6 +1,6 @@
 """End-to-end proof that the delegated identity reaches Unity Catalog.
 
-Everything here runs against the deployed stack. It signs in as a real user,
+Everything here runs against the deployed stack: it signs in as a real user,
 calls the real MCP endpoint over HTTPS, and asserts on what Databricks sent
 back. Nothing is mocked, because the claim being tested -- that Unity Catalog,
 not this codebase, decides which rows come back -- cannot be tested any other
@@ -61,24 +61,21 @@ SERVER_APP_ID = ENV.get("ENTRA_SERVER_CLIENT_ID", "").strip()
 DATABRICKS_HOST = ENV.get("DATABRICKS_HOST", "").strip().rstrip("/")
 TENANT_ID = ENV.get("AZURE_TENANT_ID", "").strip()
 WAREHOUSE_ID = ENV.get("DATABRICKS_WAREHOUSE_ID", "").strip()
-# The colleagues the two-person demo is built around. The bootstrap resolves
-# each one through SCIM and lowercases it before seeding, so this matches how
-# they are stored rather than how they were typed.
+# The bootstrap resolves each owner through SCIM and lowercases it before
+# seeding, so this matches how they are stored rather than how they were typed.
 DEMO_OWNERS = [
     owner.strip().lower()
     for owner in ENV.get("DATABRICKS_DEMO_OWNERS", "").split(",")
     if owner.strip()
 ]
-# Databricks mode only. An orders-mode deployment serves none of these tools, so
-# the whole module skips rather than failing on tools that were never meant to
-# be there.
+# An orders-mode deployment serves none of these tools, so the whole module
+# skips rather than failing on tools that were never meant to be there.
 MODE = (ENV.get("MCP_MODE", "orders").strip().lower() or "orders")
 CONFIGURED = bool(
     MODE == "databricks" and MCP_ENDPOINT and SERVER_APP_ID and DATABRICKS_HOST
 )
 
-# Written back by the bootstrap, so these follow however many owners were
-# seeded rather than drifting from a constant.
+# Written back by the bootstrap, so these follow however many owners were seeded.
 SEEDED_TOTAL = int(ENV.get("DATABRICKS_SEEDED_TOTAL", "0") or 0)
 SEEDED_FOR_USER = int(ENV.get("DATABRICKS_SEEDED_PER_OWNER", "3") or 3)
 SEEDED_FOR_USER_IN_EU = 2
@@ -105,11 +102,10 @@ def run(command: list[str]) -> str:
 def run_graph(test: unittest.TestCase, command: list[str]) -> str:
     """Run an `az` command that reaches Microsoft Graph.
 
-    Activating a PIM role changes conditional-access policy, and Microsoft Graph
-    then rejects tokens minted before the change with a Continuous Access
-    Evaluation challenge. That is a stale local login, not a defect in the
-    deployment, so it skips with instructions instead of reporting a failure.
-    Every other error still fails.
+    Activating a PIM role changes conditional-access policy, and Graph then
+    rejects tokens minted before the change. That is a stale local login, not a
+    defect in the deployment, so it skips with instructions. Every other error
+    still fails.
     """
     try:
         return run(command)
@@ -127,11 +123,9 @@ def user_token() -> str:
     """A delegated token for the MCP server, minted for the signed-in user.
 
     This works only because `harnessClientAppId` pre-authorized the Azure CLI on
-    the server application. That is opt-in and off by default -- see the note in
-    infra/main.bicep. Nothing in the running system depends on it.
-
-    Cached for the run: the token is valid for an hour and shelling out to `az`
-    costs about a second each time.
+    the server application -- opt-in and off by default, see infra/main.bicep.
+    Nothing in the running system depends on it. Cached for the run: the token
+    lasts an hour and shelling out to `az` costs about a second.
     """
     global _TOKEN
     if _TOKEN is None:
@@ -152,8 +146,8 @@ def signed_in_upn() -> str:
     """The signed-in user, read from the local CLI profile.
 
     Deliberately not `az ad signed-in-user show`: that reaches Microsoft Graph,
-    which makes the identity assertions depend on a second service having a
-    healthy token. The profile already knows who is signed in.
+    which would make the identity assertions depend on a second service having a
+    healthy token.
     """
     return run(["az", "account", "show", "--query", "user.name", "-o", "tsv"])
 
@@ -280,9 +274,8 @@ async def call(tool: str, arguments: dict | None = None):
     async with Client(transport) as client:
         result = await client.call_tool(tool, arguments or {})
 
-    # `result.data` is a generated model rather than a mapping, so the tests
-    # read the structured payload. FastMCP wraps a non-object return value —
-    # a list of tables, say — in a single `result` key.
+    # `result.data` is a generated model rather than a mapping. FastMCP wraps a
+    # non-object return value -- a list of tables, say -- in a `result` key.
     payload = result.structured_content
     if isinstance(payload, dict) and set(payload) == {"result"}:
         return payload["result"]
@@ -303,17 +296,17 @@ class DelegatedIdentityReachesDatabricks(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.upn = signed_in_upn()
-        # One query, shared by the assertions that read different columns of
-        # it. Re-running it per test would mean another MCP session, another
-        # OBO exchange and another warehouse statement for the same answer.
+        # One query, shared by the assertions that read different columns of it.
+        # Re-running it per test would mean another MCP session, another OBO
+        # exchange and another warehouse statement for the same answer.
         cls.orders = asyncio.run(call("databricks_query_orders"))
 
     def test_databricks_resolves_the_signed_in_user_not_the_server(self) -> None:
         identity = asyncio.run(call("databricks_whoami"))
 
-        # SCIM answers from the Databricks control plane; current_user() answers
-        # from the SQL warehouse. Both naming the same human is the proof that
-        # the delegated token survived the OBO exchange and both hops beyond it.
+        # SCIM answers from the control plane, current_user() from the SQL
+        # warehouse. Both naming the same human is the proof that the delegated
+        # token survived the OBO exchange and both hops beyond it.
         self.assertEqual(identity["scim_user_name"].lower(), self.upn.lower())
         self.assertEqual(identity["sql_current_user"].lower(), self.upn.lower())
         self.assertEqual(
@@ -409,10 +402,10 @@ class DelegatedIdentityReachesDatabricks(unittest.TestCase):
 class NoApplicationOnlyPathExists(unittest.TestCase):
     """The negative half of the claim, checked against live Entra ID.
 
-    These assertions hold no matter who runs them. A metastore admin bypasses
-    most Unity Catalog grants, so 'the admin cannot read table X' would be a
-    weak test; 'the server holds no permission that works without a user' is
-    the property the accelerator actually rests on.
+    A metastore admin bypasses most Unity Catalog grants, so "the admin cannot
+    read table X" would be a weak test. "The server holds no permission that
+    works without a user" is the property the accelerator actually rests on, and
+    it holds no matter who runs these.
     """
 
     def test_the_server_holds_no_application_permission(self) -> None:

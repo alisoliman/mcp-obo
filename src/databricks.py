@@ -1,14 +1,13 @@
 """Databricks tools reached through the same delegated token as the Graph ones.
 
-Nothing here decides who may see what. That is the entire point: the SQL below
-is a fixed literal, the only variable parts are bound parameters, and the token
-carried into Databricks is the caller's. Unity Catalog applies the row filter,
-the column mask, and the table grants, and Databricks writes the caller's name
--- not this server's -- into its audit log.
+Nothing here decides who may see what. The SQL below is a fixed literal, the
+only variable parts are bound parameters, and the token carried into Databricks
+is the caller's. Unity Catalog applies the row filter, the column mask and the
+table grants, and Databricks writes the caller's name -- not this server's --
+into its audit log.
 
 `src/orders.py` is the same identity path with the decision left inside the
-process. Compare the two `register` functions: they differ in the scope they ask
-Entra for, and in who decides what comes back.
+process.
 """
 
 from __future__ import annotations
@@ -33,20 +32,18 @@ from src.obo import DATABRICKS_SCOPE, OboError, OboExchange
 
 logger = logging.getLogger(__name__)
 
-# Unity Catalog identifiers are operator-supplied, never model-supplied, but
-# they are still interpolated into SQL text, so they are held to the characters
-# Databricks allows in an unquoted identifier. `str.isalnum` is not a substitute:
-# it accepts non-ASCII letters and digits such as "½".
+# Operator-supplied identifiers are still interpolated into SQL text, so they
+# are held to the characters Databricks allows unquoted. `str.isalnum` is not a
+# substitute: it accepts non-ASCII digits such as "½". Public because
+# scripts/bootstrap_databricks.py applies the same check to the same values.
 IDENTIFIER = re.compile(r"^[A-Za-z0-9_]{1,128}$")
 
-# The domains Azure Databricks actually serves workspaces from: commercial
-# first, Azure Government second. Nothing else is a place a caller's delegated
-# token may be sent.
+# The domains Azure Databricks serves workspaces from. Nothing else is a place a
+# caller's delegated token may be sent.
 HOST_SUFFIXES = (".azuredatabricks.net", ".databricks.azure.us")
 
-# The single source of truth for these tool names. `src/chat.py` holds the
-# equivalent ORDER_TOOLS, and the tests import both rather than restating them,
-# so a tool renamed on one side cannot silently drift from the other.
+# The single source of truth for these tool names; `src/chat.py` holds the
+# equivalent ORDER_TOOLS and the tests import both.
 DATABRICKS_TOOLS = frozenset(
     {"databricks_whoami", "databricks_list_tables", "databricks_query_orders"}
 )
@@ -229,8 +226,6 @@ class DatabricksSettings:
             catalog=required("DATABRICKS_CATALOG"),
             schema_name=required("DATABRICKS_SCHEMA"),
         )
-        # Validated here rather than by the caller, so a DatabricksSettings
-        # cannot exist in an unchecked state.
         for name, value in (
             ("DATABRICKS_CATALOG", settings.catalog),
             ("DATABRICKS_SCHEMA", settings.schema_name),
@@ -309,9 +304,8 @@ async def _request(
     params: dict[str, Any] | None = None,
     json: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    # The client is shared and holds no credential — the token rides in a
-    # per-request header — so reusing it keeps the TLS connection warm without
-    # any risk of one caller's identity leaking into another's request.
+    # The shared client holds no credential -- the token rides in a per-request
+    # header -- so no caller's identity can leak into another's request.
     url = settings.url(path)
     headers = {"Authorization": f"Bearer {token}"}
     attempt = 0
@@ -534,9 +528,8 @@ async def _list_tables(
 def orders_statement(table: str) -> str:
     """The only statement this server will ever run against the orders table.
 
-    Fixed text. The caller influences it through bound parameters and nothing
-    else, so there is no arrangement of tool arguments that reshapes the query.
-    Even if there were, the row filter would still apply.
+    Fixed text: the caller influences it through bound parameters and nothing
+    else. Even if they could reshape it, the row filter would still apply.
     """
     return (
         "SELECT current_user() AS ran_as, order_id, owner_email, region, "
@@ -562,18 +555,14 @@ def register(
 ) -> None:
     """Attach the Databricks tools to an already-authenticated MCP server."""
 
-    # One client for the process. It carries no credential, so sharing it costs
-    # nothing in isolation and saves a TLS handshake plus an SSL context build
-    # on every tool call.
     client = httpx.AsyncClient(timeout=_TIMEOUT, headers={"User-Agent": _USER_AGENT})
 
     def log_call(tool: str, access_token: AccessToken, statement_id: str = "") -> None:
         """One line per tool call, joinable to Databricks' own audit row.
 
         `oid` is Entra's object id for the caller: an opaque identifier, not a
-        credential. The statement id is what joins this line to
-        system.query.history on the Databricks side. The token is not an
-        argument here, so it cannot end up in the line by accident.
+        credential. The token is not an argument here, so it cannot reach the
+        line by accident.
         """
         oid = access_token.claims.get("oid") or access_token.claims.get("sub") or ""
         logger.info(
@@ -598,16 +587,14 @@ def register(
     ) -> DatabricksIdentity:
         """Show which identity Databricks resolved for the signed-in user."""
         token = await databricks_token(access_token)
-        # SCIM answers from the control plane and current_user() answers from
-        # the SQL warehouse. Agreeing means the delegated identity survived both
-        # hops, not just the first. Neither depends on the other, so they run
-        # together.
+        # SCIM answers from the control plane, current_user() from the SQL
+        # warehouse. Agreeing means the delegated identity survived both hops,
+        # not just the first.
         #
-        # Explicit tasks rather than bare coroutines because `gather` propagates
-        # the first failure without stopping its siblings: a SCIM 403 for a
-        # caller the workspace does not know returns in milliseconds, and would
-        # otherwise leave the SQL leg polling a cold warehouse for the whole
-        # statement budget after the tool has already failed.
+        # Explicit tasks because `gather` propagates the first failure without
+        # stopping its siblings: a SCIM 403 returns in milliseconds and would
+        # leave the SQL leg polling a cold warehouse for the whole budget after
+        # the tool has already failed.
         me_task = asyncio.ensure_future(
             _request(client, settings, token, "GET", "/api/2.0/preview/scim/v2/Me")
         )
@@ -652,8 +639,8 @@ def register(
     ) -> QueryResult:
         """Query the Unity Catalog orders table as the signed-in user.
 
-        Unity Catalog applies the row filter and column mask, so the rows this
-        returns are already scoped to the caller before the server sees them.
+        Unity Catalog applies the row filter and column mask, so the rows are
+        already scoped to the caller before the server sees them.
         """
         token = await databricks_token(access_token)
         statement = orders_statement(settings.orders_table)
@@ -669,8 +656,8 @@ def register(
         statement_id = _text(body.get("statement_id"), _MAX_LABEL) or ""
         log_call("databricks_query_orders", access_token, statement_id)
 
-        # `ran_as` rides along on every row so a result is self-proving, but it
-        # is lifted out of the tabular data rather than repeated to the reader.
+        # `ran_as` rides along on every row so a result is self-proving, then is
+        # lifted out rather than repeated to the reader.
         ran_as = rows[0][0] if rows and rows[0] else None
         return QueryResult(
             columns=tuple(columns[1:]),

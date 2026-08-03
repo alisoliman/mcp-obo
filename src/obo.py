@@ -1,23 +1,17 @@
 """The on-behalf-of exchange, shared by every downstream resource.
 
 This server holds no secret. Its credential is the AKS Workload Identity token
-projected into the pod, which stands in for a client secret when Entra ID asks
-the server to prove which application it is.
+projected into the pod, which stands in for a client secret. The second
+assertion -- the caller's own access token -- is what makes the exchange
+delegated: Entra returns a token that still carries the user, so the downstream
+service authorizes the person who asked rather than the server that relayed the
+question. Swapping `scope` is the entire difference between Microsoft Graph and
+Azure Databricks.
 
-What makes the exchange *delegated* rather than application-only is the second
-assertion: the caller's own access token. Entra returns a token for the
-requested resource that still carries the user, so the downstream service
-authorizes the person who asked, not the server that relayed the question.
-
-Swapping the `scope` argument is the entire difference between reaching
-Microsoft Graph and reaching Azure Databricks. Everything else about the
-exchange -- the workload assertion, the user assertion, the absence of a stored
-credential -- is identical, which is the point of keeping it in one place.
-
-The exchange itself is the handful of arguments in `_new_credential`. The rest
-of this file is the two things a middle tier cannot ship without: a cache, so
-one tool call does not mean one round trip to Entra, and an error that survives
-being masked, so an operator can tell a Conditional Access policy from a bug.
+The exchange is the handful of arguments in `_new_credential`. The rest of this
+file is a cache, so one tool call is not one round trip to Entra, and an error
+that survives being masked, so an operator can tell a Conditional Access policy
+from a bug.
 """
 
 from __future__ import annotations
@@ -38,11 +32,9 @@ from azure.identity.aio import OnBehalfOfCredential
 
 GRAPH_SCOPE = "https://graph.microsoft.com/.default"
 
-# The Azure Databricks resource application. This app id is a fixed Azure
-# constant -- the same in every tenant -- and `user_impersonation` is its only
-# delegated permission. Asking for `/.default` requests whatever delegated
-# permissions this application has been consented, which infra/main.bicep pins
-# to exactly that one scope.
+# A fixed Azure constant, the same in every tenant. `/.default` asks for
+# whatever delegated permissions this application has been consented, which
+# infra/main.bicep pins to `user_impersonation` alone.
 DATABRICKS_RESOURCE_APP_ID = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
 DATABRICKS_SCOPE = f"{DATABRICKS_RESOURCE_APP_ID}/.default"
 
@@ -141,24 +133,22 @@ class OboExchange:
         try:
             return (await entry.credential.get_token(scope)).token
         except ClientAuthenticationError as cause:
-            # Whatever Entra just refused -- a revoked assertion, a policy that
-            # now demands a step-up -- it will refuse again, and this credential
-            # is also holding the downstream token it minted before that
-            # happened. Retiring it takes it out of the cache without closing it
-            # under any concurrent caller; the last one out does that.
+            # Whatever Entra just refused it will refuse again, and this
+            # credential still holds the downstream token it minted before that
+            # happened. Retiring takes it out of the cache without closing it
+            # under a concurrent caller; the last one out does that.
             await self._retire(key, entry)
             raise _entra_refusal(cause) from cause
         except Exception as cause:
-            # Not Entra's answer -- a transport failure, or the projected
-            # workload token gone from the filesystem -- but it needs the same
-            # escape from `mask_error_details`. Only the exception type travels
-            # out, because unlike Entra's error body an arbitrary message has
-            # not been vetted for what it might name.
+            # Only the exception type travels out: unlike Entra's error body, an
+            # arbitrary message has not been vetted for what it might name.
             raise OboError(
                 "The on-behalf-of exchange failed before Entra ID answered "
                 f"({type(cause).__name__})"
             ) from cause
         finally:
+            # Not `async with`: the credential outlives this call when the cache
+            # keeps it, so closing is the reference count's job, not the block's.
             await self._release(entry)
 
     def _new_credential(self, user_assertion: str) -> OnBehalfOfCredential:
