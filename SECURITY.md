@@ -42,13 +42,18 @@ Microsoft follows the principle of [Coordinated Vulnerability Disclosure](https:
 
 ## A note specific to this sample
 
-This is a demonstration of a delegated identity pattern, not a hardened
-deployment. [docs/limits.md](docs/limits.md) lists what it deliberately does not
-do -- no human approval gate on tool calls, one in-memory session store, a
-Databricks workspace with public network access, no rate limiting worth the
-name. Those are documented limits rather than undiscovered vulnerabilities, and
-a report of one will be closed pointing back at that document.
+This is a demonstration of a delegated identity pattern rather than official
+guidance or a hardened deployment. [docs/limits.md](docs/limits.md) lists what
+it deliberately does not do -- no human approval gate on tool calls, one
+in-memory session store, a Databricks workspace with public network access, no
+rate limiting worth the name. Those are documented decisions rather than
+undiscovered vulnerabilities, and a report of one will be closed pointing back
+at that document.
 
 What is worth reporting: anything that breaks the claim the sample actually
 makes -- that no tool call can read data the signed-in user could not read, and
 that neither workload can reach user data on its own.
+
+Anyone deploying this should still run their own security review against their
+own requirements. The limits above are the ones we know about; your environment
+will have its own.

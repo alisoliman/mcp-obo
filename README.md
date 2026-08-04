@@ -30,14 +30,25 @@ in front of it.
 [![Open in GitHub Codespaces](https://img.shields.io/static/v1?style=for-the-badge&label=GitHub+Codespaces&message=Open&color=brightgreen&logo=github)](https://codespaces.new/alisoliman/mcp-obo?devcontainer_path=.devcontainer%2Fdevcontainer.json)
 [![Open in Dev Containers](https://img.shields.io/static/v1?style=for-the-badge&label=Dev%20Containers&message=Open&color=blue&logo=visualstudiocode)](https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/alisoliman/mcp-obo)
 
-## Important notice
+## About this sample
 
-This sample demonstrates a delegated identity pattern. It is not a hardened
-deployment, and several things a production system needs are deliberately
-absent — there is no human approval gate on tool calls, sessions live in one
-pod's memory, and the Databricks workspace ships open to the network.
-**[docs/limits.md](docs/limits.md) lists all of them.** Read it before adapting
-this.
+This is a working reference for a pattern, written to shorten the distance
+between "we want every tool call to run as the user" and something you can
+deploy, read and reason about. It is not official Microsoft guidance, and it is
+not a hardened deployment — think of it as a starting point you take ownership
+of rather than a template to adopt unchanged.
+
+Some things a production system needs are deliberately absent: there is no human
+approval gate on tool calls, sessions live in one pod's memory, and the
+Databricks workspace ships open to the network.
+**[docs/limits.md](docs/limits.md) lists every one of them**, so you can see the
+whole picture before building on it.
+
+Run your own security review and validate the design against your
+organisation's requirements before it carries anything real. The code is
+commented with that review in mind: where something is a deliberate trade-off,
+it says so and says why, so you can decide whether the same trade-off is right
+for you.
 
 ## Contents
 
