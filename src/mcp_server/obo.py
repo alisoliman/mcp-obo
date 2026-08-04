@@ -123,9 +123,7 @@ class OboExchange:
     _cache: OrderedDict[str, _CachedCredential] = field(
         default_factory=OrderedDict, compare=False, repr=False
     )
-    _lock: asyncio.Lock = field(
-        default_factory=asyncio.Lock, compare=False, repr=False
-    )
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, compare=False, repr=False)
 
     async def token(self, user_assertion: str, scope: str) -> str:
         key = sha256(user_assertion.encode("utf-8")).hexdigest()

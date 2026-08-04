@@ -1,0 +1,63 @@
+name: Infrastructure
+
+# The template is the one part of this repo that decides what Entra is asked
+# for, so it gets compiled on every change rather than only when someone runs
+# `azd up`. `tests/test_infrastructure.py` reads the compiled output and asserts
+# that no application permission appears in it; that runs in the Python
+# workflow, and skips itself when the toolchain is absent -- which on a runner
+# without the az CLI would mean the claim goes unchecked. Installing Bicep here
+# is what stops that skip from being silent.
+on:
+  push:
+    branches: [main]
+    paths: ["infra/**", "azure.yaml", "k8s/**", ".github/workflows/infra.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["infra/**", "azure.yaml", "k8s/**", ".github/workflows/infra.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bicep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Bicep
+        run: az bicep install
+
+      - name: Compile the template
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+      - name: Lint the template
+        # Warnings from the analyzer are worth seeing on a sample even where
+        # they are not worth failing on; `az bicep build` above is the gate.
+        run: az bicep lint --file infra/main.bicep || true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Assert the permission model
+        run: uv run --frozen pytest tests/test_infrastructure.py -v
+
+  kustomize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Render both overlays
+        # `azd deploy` writes an `images:` block into each kustomization before
+        # applying, so what CI renders is the manifest minus that one edit. A
+        # broken overlay otherwise surfaces at deploy time, after provisioning
+        # has already run and charged for a cluster.
+        run: |
+          for overlay in k8s/mcp k8s/chat; do
+            echo "::group::$overlay"
+            kubectl kustomize "$overlay"
+            echo "::endgroup::"
+          done

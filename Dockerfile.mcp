@@ -13,12 +13,14 @@ ENV PATH="/app/.venv/bin:$PATH" \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY src ./src
+COPY src/__init__.py ./src/
+COPY src/shared ./src/shared
+COPY src/mcp_server ./src/mcp_server
 
 USER 65532:65532
 EXPOSE 8000
-# Module form, not `python src/server.py`. Running the file directly puts
-# /app/src on sys.path instead of /app, and the server imports its siblings as
-# `src.obo` / `src.databricks` so the tests and the image resolve them the same
-# way.
-CMD ["python", "-m", "src.server"]
+# Module form, not `python src/mcp_server/server.py`. Running the file directly
+# puts /app/src/mcp_server on sys.path instead of /app, and the server imports
+# its siblings as `src.mcp_server.obo` / `src.shared.modes` so the tests and the
+# image resolve them the same way.
+CMD ["python", "-m", "src.mcp_server"]

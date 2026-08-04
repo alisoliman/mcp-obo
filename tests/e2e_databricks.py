@@ -8,10 +8,12 @@ way.
 
 Run it after `azd up`:
 
-    uv run python -m unittest test_databricks_e2e -v
+    uv run pytest tests/e2e_databricks.py
 
-The whole module skips when the environment is not configured, so it is safe to
-leave in the default `python -m unittest` discovery run.
+The filename is the guard. pytest collects `test_*.py`, so a bare `pytest` never
+picks this module up and the fast local loop cannot quietly become live round
+trips once someone has deployed. Naming the file is the only way to run it. The
+module also skips itself when the environment is not configured.
 
 A few checks read workspace configuration -- a warehouse ACL, the query history
 -- instead of calling the MCP server, because what they assert is a grant rather
@@ -35,7 +37,7 @@ import httpx
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
-from src.obo import DATABRICKS_RESOURCE_APP_ID
+from src.mcp_server.obo import DATABRICKS_RESOURCE_APP_ID
 
 
 def azd_env() -> dict[str, str]:
@@ -70,7 +72,7 @@ DEMO_OWNERS = [
 ]
 # An orders-mode deployment serves none of these tools, so the whole module
 # skips rather than failing on tools that were never meant to be there.
-MODE = (ENV.get("MCP_MODE", "orders").strip().lower() or "orders")
+MODE = ENV.get("MCP_MODE", "orders").strip().lower() or "orders"
 CONFIGURED = bool(
     MODE == "databricks" and MCP_ENDPOINT and SERVER_APP_ID and DATABRICKS_HOST
 )
@@ -131,9 +133,15 @@ def user_token() -> str:
     if _TOKEN is None:
         _TOKEN = run(
             [
-                "az", "account", "get-access-token",
-                "--resource", f"api://{SERVER_APP_ID}",
-                "--query", "accessToken", "-o", "tsv",
+                "az",
+                "account",
+                "get-access-token",
+                "--resource",
+                f"api://{SERVER_APP_ID}",
+                "--query",
+                "accessToken",
+                "-o",
+                "tsv",
             ]
         )
     return _TOKEN
@@ -165,9 +173,15 @@ def workspace_token() -> str:
     if _WORKSPACE_TOKEN is None:
         _WORKSPACE_TOKEN = run(
             [
-                "az", "account", "get-access-token",
-                "--resource", DATABRICKS_RESOURCE_APP_ID,
-                "--query", "accessToken", "-o", "tsv",
+                "az",
+                "account",
+                "get-access-token",
+                "--resource",
+                DATABRICKS_RESOURCE_APP_ID,
+                "--query",
+                "accessToken",
+                "-o",
+                "tsv",
             ]
         )
     return _WORKSPACE_TOKEN
@@ -195,9 +209,7 @@ def workspace_get(
     try:
         token = workspace_token()
     except subprocess.CalledProcessError:
-        test.skipTest(
-            "the Azure CLI could not mint a Databricks token; run `az login`"
-        )
+        test.skipTest("the Azure CLI could not mint a Databricks token; run `az login`")
     response = httpx.request(
         "GET",
         f"{DATABRICKS_HOST}{path}",
@@ -410,10 +422,20 @@ class NoApplicationOnlyPathExists(unittest.TestCase):
 
     def test_the_server_holds_no_application_permission(self) -> None:
         permissions = json.loads(
-            run_graph(self, [
-                "az", "ad", "app", "permission", "list",
-                "--id", SERVER_APP_ID, "-o", "json",
-            ])
+            run_graph(
+                self,
+                [
+                    "az",
+                    "ad",
+                    "app",
+                    "permission",
+                    "list",
+                    "--id",
+                    SERVER_APP_ID,
+                    "-o",
+                    "json",
+                ],
+            )
         )
         granted = [
             access
@@ -435,11 +457,20 @@ class NoApplicationOnlyPathExists(unittest.TestCase):
             )
         )
         assignments = json.loads(
-            run_graph(self, [
-                "az", "rest", "--method", "GET", "--url",
-                f"https://graph.microsoft.com/v1.0/servicePrincipals/{principal['id']}"
-                "/appRoleAssignments", "-o", "json",
-            ])
+            run_graph(
+                self,
+                [
+                    "az",
+                    "rest",
+                    "--method",
+                    "GET",
+                    "--url",
+                    f"https://graph.microsoft.com/v1.0/servicePrincipals/{principal['id']}"
+                    "/appRoleAssignments",
+                    "-o",
+                    "json",
+                ],
+            )
         )
         self.assertEqual(
             assignments.get("value", []),
@@ -564,9 +595,9 @@ class TheWarehouseAdmitsEverySeededOwner(unittest.TestCase):
                 "DATABRICKS_DEMO_OWNERS and re-run the bootstrap to exercise this"
             )
 
-        acl = workspace_get(
-            self, f"/api/2.0/permissions/warehouses/{WAREHOUSE_ID}"
-        ) or {}
+        acl = (
+            workspace_get(self, f"/api/2.0/permissions/warehouses/{WAREHOUSE_ID}") or {}
+        )
         held = {
             str(entry["user_name"]).lower(): {
                 str(permission.get("permission_level") or "")

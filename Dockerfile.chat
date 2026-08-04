@@ -21,12 +21,18 @@ ENV PATH="/app/.venv/bin:$PATH" \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY src ./src
+COPY src/__init__.py ./src/
+COPY src/shared ./src/shared
+COPY src/chat_app ./src/chat_app
 COPY --from=frontend /frontend/dist ./frontend/dist
 
 USER 65532:65532
 EXPOSE 8001
-# Module form, not `python src/chat.py`. Running the file directly puts
-# /app/src on sys.path instead of /app, and chat.py imports its sibling as
-# `src.databricks` to share the tool-name list with the MCP server.
-CMD ["python", "-m", "src.chat"]
+# Only this workload's tree is copied, so an import that reaches across into
+# `src.mcp_server` fails the build rather than quietly shipping the resource
+# server inside the client's image.
+#
+# Module form, not `python src/chat_app/app.py`. Running the file directly puts
+# /app/src/chat_app on sys.path instead of /app, and the app imports its
+# siblings as `src.chat_app.sessions` / `src.shared.tools`.
+CMD ["python", "-m", "src.chat_app"]

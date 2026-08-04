@@ -1,0 +1,51 @@
+name: Deployment problem
+description: Something failed during azd up, or the deployed app does not work
+labels: ["deployment"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: [docs/troubleshooting.md](../../blob/main/docs/troubleshooting.md)
+        covers the failures that come up most often -- Entra role activation,
+        model quota, AKS RBAC propagation, a pending certificate.
+
+        [docs/limits.md](../../blob/main/docs/limits.md) lists what this sample
+        deliberately does not do. If the behaviour you hit is described there,
+        it is a documented limit rather than a bug.
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which mode
+      options:
+        - orders
+        - databricks
+    validations:
+      required: true
+  - type: input
+    id: step
+    attributes:
+      label: Which command failed
+      placeholder: azd up / azd provision / azd deploy / opening the app
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What it printed
+      description: >
+        Paste the error. Redact subscription ids, tenant ids and hostnames if
+        you would rather not share them -- the shape of the failure is usually
+        enough.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Your environment
+      description: >
+        Operating system, and the output of `azd version`, `az version`,
+        `uv --version`, `helm version` and `kubectl version --client`.
+      render: shell
+    validations:
+      required: true

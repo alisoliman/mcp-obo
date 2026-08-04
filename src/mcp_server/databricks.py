@@ -6,7 +6,7 @@ is the caller's. Unity Catalog applies the row filter, the column mask and the
 table grants, and Databricks writes the caller's name -- not this server's --
 into its audit log.
 
-`src/orders.py` is the same identity path with the decision left inside the
+`src/mcp_server/orders.py` is the same identity path with the decision left inside the
 process.
 """
 
@@ -28,7 +28,7 @@ from fastmcp.server.auth import AccessToken
 from fastmcp.server.dependencies import CurrentAccessToken
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from src.obo import DATABRICKS_SCOPE, OboError, OboExchange
+from src.mcp_server.obo import DATABRICKS_SCOPE, OboError, OboExchange
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,6 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9_]{1,128}$")
 # The domains Azure Databricks serves workspaces from. Nothing else is a place a
 # caller's delegated token may be sent.
 HOST_SUFFIXES = (".azuredatabricks.net", ".databricks.azure.us")
-
-# The single source of truth for these tool names; `src/chat.py` holds the
-# equivalent ORDER_TOOLS and the tests import both.
-DATABRICKS_TOOLS = frozenset(
-    {"databricks_whoami", "databricks_list_tables", "databricks_query_orders"}
-)
 
 Region = Annotated[
     str,
@@ -323,8 +317,7 @@ async def _request(
         # sends is a read, so replaying one cannot double an effect.
         if response.status_code not in _RETRYABLE_STATUS or attempt >= _MAX_ATTEMPTS:
             raise ToolError(
-                f"Databricks returned {response.status_code}: "
-                f"{_error_detail(response)}"
+                f"Databricks returned {response.status_code}: {_error_detail(response)}"
             )
         await asyncio.sleep(
             _retry_delay(attempt, _retry_after(response), random.random())
@@ -512,7 +505,11 @@ async def _list_tables(
         if page_token:
             params["page_token"] = page_token
         body = await _request(
-            client, settings, token, "GET", "/api/2.1/unity-catalog/tables",
+            client,
+            settings,
+            token,
+            "GET",
+            "/api/2.1/unity-catalog/tables",
             params=params,
         )
         tables.extend(_table_summary(table) for table in body.get("tables") or [])
@@ -550,9 +547,7 @@ def orders_parameters(region: str | None, limit: int) -> list[dict[str, Any]]:
     ]
 
 
-def register(
-    mcp: FastMCP, exchange: OboExchange, settings: DatabricksSettings
-) -> None:
+def register(mcp: FastMCP, exchange: OboExchange, settings: DatabricksSettings) -> None:
     """Attach the Databricks tools to an already-authenticated MCP server."""
 
     client = httpx.AsyncClient(timeout=_TIMEOUT, headers={"User-Agent": _USER_AGENT})
@@ -617,7 +612,11 @@ def register(
         return DatabricksIdentity(
             scim_user_name=_text(me.get("userName"), _MAX_LABEL) or "",
             scim_display_name=_text(me.get("displayName"), _MAX_LABEL),
-            sql_current_user=rows[0][0] if rows and rows[0] else "",
+            # A JSON_ARRAY cell arrives as null when the value is SQL NULL, and
+            # `current_user()` returning one would otherwise fail this model's
+            # validation -- surfacing as a masked internal error rather than as
+            # the empty identity it actually is.
+            sql_current_user=(rows[0][0] or "") if rows and rows[0] else "",
             workspace_host=settings.host,
         )
 

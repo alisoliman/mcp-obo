@@ -1,0 +1,22 @@
+name: Bug or question
+description: Something in the code or the docs is wrong, or you want to ask about it
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: >
+        If it is a code issue, the smallest sequence that shows it. If it is a
+        docs issue, which file and which line.

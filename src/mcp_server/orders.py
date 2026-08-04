@@ -7,7 +7,7 @@ object id is the only key the store is partitioned by.
 
 The authorization decision is a line of Python -- `list_orders_for(user.id)` --
 correct only for as long as every tool passes the caller's id and nothing else.
-`src/databricks.py` is the same identity path with that decision moved out of
+`src/mcp_server/databricks.py` is the same identity path with that decision moved out of
 the process entirely.
 """
 
@@ -27,13 +27,7 @@ from fastmcp.server.dependencies import CurrentAccessToken
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from src.obo import GRAPH_SCOPE, OboError, OboExchange
-
-# The single source of truth for these names: `src/chat.py` passes them to the
-# agent as its allow-list and the tests import them.
-ORDER_TOOLS = frozenset(
-    {"who_am_i", "list_orders", "get_order", "create_order", "update_order_status"}
-)
+from src.mcp_server.obo import GRAPH_SCOPE, OboError, OboExchange
 
 # Annotations are hints and this server still decides for itself, but they are
 # the only thing a client can read to tell a question from a change. Declaring

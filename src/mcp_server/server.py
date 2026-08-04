@@ -10,8 +10,8 @@ Everything identity-related happens here, and it is the same in both modes:
 
 `MCP_MODE` then decides which downstream resource that is:
 
-    orders      -> src/orders.py      -> Microsoft Graph
-    databricks  -> src/databricks.py  -> Azure Databricks + Unity Catalog
+    orders      -> src/mcp_server/orders.py      -> Microsoft Graph
+    databricks  -> src/mcp_server/databricks.py  -> Azure Databricks + Unity Catalog
 
 The two are alternatives, not layers, so a reader follows exactly one path.
 Neither has an application-permission path to its data: without a caller there
@@ -29,17 +29,13 @@ from fastmcp.server.auth import RemoteAuthProvider
 from fastmcp.server.auth.providers.azure import AzureJWTVerifier
 from pydantic import AnyHttpUrl
 from starlette.datastructures import Headers
-from starlette.middleware import Middleware
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from src import databricks as databricks_tools
-from src import orders as order_tools
-from src.obo import OboExchange
-
-ORDERS_MODE = "orders"
-DATABRICKS_MODE = "databricks"
-MODES = (ORDERS_MODE, DATABRICKS_MODE)
+from src.mcp_server import databricks as databricks_tools
+from src.mcp_server import orders as order_tools
+from src.mcp_server.obo import OboExchange
+from src.shared.modes import DATABRICKS_MODE, ORDERS_MODE, current_mode
 
 # Pinned rather than left to the fastmcp default, because infra/main.bicep
 # publishes `MCP_ENDPOINT` as this exact path.
@@ -114,13 +110,6 @@ def _required_env(name: str) -> str:
     return value
 
 
-def current_mode() -> str:
-    mode = os.getenv("MCP_MODE", ORDERS_MODE).strip().lower() or ORDERS_MODE
-    if mode not in MODES:
-        raise RuntimeError(f"MCP_MODE must be one of {', '.join(MODES)}, got {mode!r}")
-    return mode
-
-
 def create_server() -> FastMCP:
     mode = current_mode()
     tenant_id = _required_env("AZURE_TENANT_ID")
@@ -181,14 +170,3 @@ def create_server() -> FastMCP:
         databricks_tools.register(mcp, exchange, settings)
 
     return mcp
-
-
-if __name__ == "__main__":
-    create_server().run(
-        transport="http",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        path=MCP_PATH,
-        middleware=[Middleware(SameOriginOnly, allowed=allowed_origins())],
-        show_banner=False,
-    )

@@ -1,0 +1,70 @@
+name: Python
+
+# The checks the README asks a contributor to run, run for them. Everything here
+# is decidable without Azure: no subscription, no deployment, no secrets. The
+# end-to-end module is not collected -- it does not match pytest's `test_*.py`
+# pattern -- which is what keeps this workflow from needing credentials.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", ".github/ISSUE_TEMPLATE/**"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", ".github/ISSUE_TEMPLATE/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Both, because the azd hooks and the developer loop are supposed to work on
+    # each. A POSIX-only sample is half a sample.
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Test
+        run: uv run pytest
+
+  types:
+    # One platform is enough: mypy's findings do not vary by host, and the
+    # `.venv` path it needs does.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Type check
+        # mypy runs isolated rather than from the dev group, reading the
+        # project's packages through `--python-executable`. pyproject.toml says
+        # why.
+        run: uvx mypy==2.3.0 --python-executable .venv/bin/python
