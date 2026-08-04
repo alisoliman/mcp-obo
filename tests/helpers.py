@@ -19,7 +19,7 @@ MCP_ENVIRONMENT = {
     "AZURE_TENANT_ID": "11111111-1111-1111-1111-111111111111",
     "ENTRA_SERVER_CLIENT_ID": "22222222-2222-2222-2222-222222222222",
     "MCP_SERVER_URL": "https://orders.example.test",
-    "MCP_MODE": "orders",
+    "MCP_MODE": "graph",
 }
 DATABRICKS_ENVIRONMENT = {
     "DATABRICKS_HOST": "https://adb-1234567890.11.azuredatabricks.net",

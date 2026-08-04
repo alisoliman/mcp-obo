@@ -13,7 +13,7 @@ that would have made it too long to read.
 
 You deploy one. They are alternatives, not layers.
 
-- [orders mode](orders-mode.md) — the MCP server authorizes, using Microsoft
+- [graph mode](graph-mode.md) — the MCP server authorizes, using Microsoft
   Graph to say who you are
 - [databricks mode](databricks-mode.md) — Unity Catalog authorizes, with row
   filters and column masks applied before the server sees a row
@@ -35,6 +35,6 @@ You deploy one. They are alternatives, not layers.
 **Diagrams**
 
 `architecture`, `token-flow`, `trust-boundaries` and `databricks-obo` are
-committed as both `.d2` source and rendered `.svg`. See
-[local development](localdev.md#rebuilding-the-diagrams) for how to re-render
-them.
+committed as both `.d2` source and rendered `.svg`. `_theme.d2` holds the style
+they share. See [local development](localdev.md#rebuilding-the-diagrams) for
+how to re-render them.

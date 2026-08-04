@@ -1,4 +1,4 @@
-"""Orders mode: the MCP server authorizes, using Microsoft Graph to say who you are.
+"""Graph mode: the MCP server authorizes, using Microsoft Graph to say who you are.
 
 The store is an in-memory dict, but the identity path around it is the real
 thing: the caller's token is exchanged on their behalf for a Microsoft Graph

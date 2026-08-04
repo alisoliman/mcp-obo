@@ -15,7 +15,7 @@
       "value": "${HARNESS_CLIENT_APP_ID=}"
     },
     "deploymentMode": {
-      "value": "${MCP_MODE=orders}"
+      "value": "${MCP_MODE=graph}"
     },
     "allowedPrincipalIds": {
       "value": "${ALLOWED_PRINCIPAL_IDS=}"

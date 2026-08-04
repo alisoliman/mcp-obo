@@ -1,117 +1,51 @@
-# Deployment topology for the delegated MCP OBO accelerator.
+...@_theme
+
+# What runs where, and which links carry the user's identity.
+# Sequence and step order live in token-flow.d2, not here.
 # Render: d2 docs/architecture.d2 docs/architecture.svg
-# Green edges carry a user identity, blue edges do not.
 
-vars: {
-  d2-config: {
-    layout-engine: dagre
-    pad: 20
-  }
-}
-
-direction: right
-
-classes: {
-  identity: {
-    style: {
-      fill: "#DBF2E0"
-      stroke: "#006731"
-      stroke-width: 2
-      font-color: "#0B1219"
-      border-radius: 8
-    }
-  }
-  protocol: {
-    style: {
-      fill: "#D9EAFA"
-      stroke: "#0068B2"
-      stroke-width: 2
-      font-color: "#0B1219"
-      border-radius: 8
-    }
-  }
-  workload: {
-    style: {
-      fill: "#FFFFFF"
-      stroke: "#075726"
-      stroke-width: 2
-      font-color: "#0B1219"
-      border-radius: 8
-    }
-  }
-  plain: {
-    style: {
-      fill: "#FFFFFF"
-      stroke: "#B0B8C1"
-      font-color: "#0B1219"
-      border-radius: 8
-    }
-  }
-  group: {
-    style: {
-      fill: "#EFF2F6"
-      stroke: "#B0B8C1"
-      font-color: "#4A545D"
-      border-radius: 10
-    }
-  }
-  ns: {
-    style: {
-      fill: "#E7EBEF"
-      stroke: "#B0B8C1"
-      font-color: "#4A545D"
-      border-radius: 10
-      stroke-dash: 3
-    }
-  }
-}
+direction: down
 
 user: {
   label: "Signed-in user"
-  shape: person
-  class: identity
+  class: actor
 }
 
 aks: {
-  label: "AKS  ·  OIDC issuer  ·  Workload Identity"
+  label: "AKS · workload identity"
+  label.near: top-left
   class: group
 
   ingress: {
-    label: "ingress-nginx\nTLS via cert-manager"
-    class: plain
+    label: "ingress-nginx\nTLS termination"
+    class: node
   }
-
-  orders: {
-    label: "namespace: orders"
-    label.near: top-left
-    class: ns
-
-    chat: {
-      label: "order-agent-chat\nAgent Framework + React\nfederated to chat app"
-      class: workload
-    }
-    mcp: {
-      label: "fastmcp-orders\nMCP resource server\nfederated to server app"
-      class: workload
-    }
+  chat: {
+    label: "order-agent-chat\nAgent Framework + React"
+    class: node
+  }
+  mcp: {
+    label: "fastmcp-orders\nMCP resource server"
+    class: node
   }
 }
 
 foundry: {
   label: "Microsoft Foundry\ngpt-5.6-terra"
-  class: protocol
+  class: node
 }
 
 entra: {
   label: "Microsoft Entra ID"
+  label.near: top-right
   class: group
 
   chatapp: {
-    label: "Chat app registration"
+    label: "chat app\nregistration"
     class: identity
   }
   serverapp: {
-    label: "Server app registration\nMcp.Tools.ReadWrite"
+    label: "server app\nregistration"
     class: identity
   }
 }
@@ -121,37 +55,13 @@ graph: {
   class: identity
 }
 
-user -> aks.ingress: "HTTPS" {
-  style.stroke: "#0068B2"
-  style.stroke-width: 2
-}
-aks.ingress -> aks.orders.chat: "/" {
-  style.stroke: "#0068B2"
-  style.stroke-width: 2
-}
-aks.ingress -> aks.orders.mcp: "/mcp" {
-  style.stroke: "#0068B2"
-  style.stroke-width: 2
-}
-
-aks.orders.chat -> entra.chatapp: "1 · auth code\n+ PKCE" {
-  style.stroke: "#006731"
-  style.stroke-width: 2
-}
-aks.orders.chat -> foundry: "2 · inference" {
-  style.stroke: "#0068B2"
-  style.stroke-width: 2
-}
-aks.orders.chat -> aks.orders.mcp: "3 · user's delegated\ntoken as Bearer" {
-  style.stroke: "#006731"
-  style.stroke-width: 3
-  style.bold: true
-}
-aks.orders.mcp -> entra.serverapp: "4 · OBO exchange" {
-  style.stroke: "#006731"
-  style.stroke-width: 2
-}
-aks.orders.mcp -> graph: "5 · GET /me" {
-  style.stroke: "#006731"
-  style.stroke-width: 2
-}
+user -> aks.ingress: "HTTPS" { class: plain }
+aks.ingress -> aks.chat: "/" { class: plain }
+aks.chat -> foundry: "inference" { class: plain }
+aks.chat -> entra.chatapp: "sign-in\nauth code + PKCE" { class: carries }
+# The chat pod has no in-cluster route to the MCP server: MCP_ENDPOINT is the
+# public hostname, so its own tool calls leave and come back through ingress.
+aks.chat -> aks.ingress: "tool call" { class: carries }
+aks.ingress -> aks.mcp: "/mcp\nuser's token as Bearer" { class: carries }
+aks.mcp -> entra.serverapp: "on-behalf-of\nexchange" { class: carries }
+aks.mcp -> graph: "user's\nGraph token" { class: carries }

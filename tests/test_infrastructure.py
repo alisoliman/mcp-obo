@@ -1,4 +1,5 @@
-"""What the compiled Bicep template asks Entra for."""
+"""What the compiled Bicep template declares: the permissions it asks Entra
+for, and the modes it will provision."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import json
 import shutil
 import subprocess
 import unittest
+from functools import cache
 from typing import Any
 
 from src.mcp_server.obo import (
@@ -13,6 +15,7 @@ from src.mcp_server.obo import (
     DATABRICKS_SCOPE,
     GRAPH_SCOPE,
 )
+from src.shared.modes import MODES
 from tests.helpers import (
     ARM_ACCESS_TYPE,
     BICEP_ABSENT,
@@ -20,40 +23,39 @@ from tests.helpers import (
 )
 
 
-class EntraPermissionTests(unittest.TestCase):
-    """The permission model, read off the template rather than the prose."""
+@cache
+def bicep_build() -> subprocess.CompletedProcess[str]:
+    """The compile itself, run once for the whole module.
 
-    def test_the_two_downstream_scopes_differ_only_by_resource(self) -> None:
-        self.assertEqual(GRAPH_SCOPE, "https://graph.microsoft.com/.default")
-        self.assertEqual(DATABRICKS_SCOPE, f"{DATABRICKS_RESOURCE_APP_ID}/.default")
-        # A fixed Azure constant, identical in every tenant.
-        self.assertEqual(
-            DATABRICKS_RESOURCE_APP_ID, "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
-        )
+    It takes seconds and more than one test reads the output.
+    """
+    return subprocess.run(
+        [
+            "az",
+            "bicep",
+            "build",
+            "--file",
+            str(ROOT / "infra" / "main.bicep"),
+            "--stdout",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
 
+
+class CompiledTemplateTestCase(unittest.TestCase):
     def compiled_arm_template(self) -> dict[str, Any]:
         """infra/main.bicep as ARM JSON, or a skip if there is no bicep here.
 
         A failed compile is only a reason to skip when the toolchain is missing.
         A template that no longer compiles is exactly the kind of breakage the
-        test below exists to catch, so it fails rather than reporting itself
+        tests below exist to catch, so it fails rather than reporting itself
         green-by-omission.
         """
         if shutil.which("az") is None:
             self.skipTest("the az CLI is not installed")
-        compiled = subprocess.run(
-            [
-                "az",
-                "bicep",
-                "build",
-                "--file",
-                str(ROOT / "infra" / "main.bicep"),
-                "--stdout",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
+        compiled = bicep_build()
         if compiled.returncode != 0:
             stderr = compiled.stderr.strip()
             missing = "Error BCP" not in stderr and any(
@@ -63,6 +65,18 @@ class EntraPermissionTests(unittest.TestCase):
                 self.skipTest(f"az bicep is unavailable: {stderr[:200]}")
             self.fail(f"infra/main.bicep does not compile:\n{stderr}")
         return json.loads(compiled.stdout)
+
+
+class EntraPermissionTests(CompiledTemplateTestCase):
+    """The permission model, read off the template rather than the prose."""
+
+    def test_the_two_downstream_scopes_differ_only_by_resource(self) -> None:
+        self.assertEqual(GRAPH_SCOPE, "https://graph.microsoft.com/.default")
+        self.assertEqual(DATABRICKS_SCOPE, f"{DATABRICKS_RESOURCE_APP_ID}/.default")
+        # A fixed Azure constant, identical in every tenant.
+        self.assertEqual(
+            DATABRICKS_RESOURCE_APP_ID, "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+        )
 
     def test_no_application_permission_is_ever_requested(self) -> None:
         # Compiled, not grepped. `type: 'Role'` is how a Bicep resourceAccess
@@ -134,4 +148,20 @@ class EntraPermissionTests(unittest.TestCase):
         self.assertEqual(
             template["variables"]["databricksAppId"],
             "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d",
+        )
+
+
+class ModesTheTemplateWillProvision(CompiledTemplateTestCase):
+    """`@allowed` against `MODES`.
+
+    A name missing from the list fails at provision time, after the resource
+    group already exists. The frontend's half of the same agreement is in
+    tests/test_contracts.py, which does not need a Bicep compile to check it.
+    """
+
+    def test_the_template_allows_exactly_the_modes_the_code_knows(self) -> None:
+        template = self.compiled_arm_template()
+        # As a set: the order of an `@allowed` list carries nothing.
+        self.assertEqual(
+            set(template["parameters"]["deploymentMode"]["allowedValues"]), set(MODES)
         )

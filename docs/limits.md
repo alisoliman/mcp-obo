@@ -87,7 +87,7 @@ renewed at sign-in for that reason.
 
 ## Data that resets
 
-- orders mode keeps orders in memory; they reset with the pod.
+- graph mode keeps orders in memory; they reset with the pod.
 - databricks mode drops and reseeds the demo tables on every bootstrap run.
 
 ## The warehouse sleeps

@@ -42,7 +42,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      - name: Assert the permission model
+      - name: Assert the permission model and the modes it will provision
         run: uv run --frozen pytest tests/test_infrastructure.py -v
 
   kustomize:

@@ -69,19 +69,19 @@ for you.
 
 The two are alternatives, not layers. Each is a complete example; you deploy one.
 
-| | **orders** | **databricks** |
+| | **graph** | **databricks** |
 |---|---|---|
 | For | Building your own MCP server on Azure | Reaching a governed data platform as the caller |
 | Downstream | Microsoft Graph | Azure Databricks + Unity Catalog |
 | Who authorizes | Your code, by the object id Graph returned | Unity Catalog row filters, column masks and grants |
 | Extra infrastructure | None | A premium Databricks workspace |
-| Read next | [orders mode](docs/orders-mode.md) | [databricks mode](docs/databricks-mode.md) |
+| Read next | [graph mode](docs/graph-mode.md) | [databricks mode](docs/databricks-mode.md) |
 
 The identity path is **identical** in both. The only difference is which scope
 the on-behalf-of exchange asks Entra for:
 
 ```
-orders      scope = https://graph.microsoft.com/.default
+graph       scope = https://graph.microsoft.com/.default
 databricks  scope = 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default
 ```
 
@@ -105,10 +105,10 @@ the authorization system. Read it once and the rest of the repo follows.
 
 ## What runs where
 
-<img src="docs/architecture.svg" alt="The browser reaches ingress-nginx on AKS, which routes / to the chat workload and /mcp to the FastMCP resource server. Green edges carry a user identity to Entra ID and the downstream resource; blue edges carry transport and Foundry inference." width="100%">
+<img src="docs/architecture.svg" alt="The browser reaches ingress-nginx on AKS, which routes / to the chat workload and /mcp to the FastMCP resource server. Green edges carry a user identity to the two Entra app registrations and to Microsoft Graph; grey edges carry transport and Foundry inference." width="100%">
 
-Green edges carry or establish a user identity. Blue edges do not — which is why
-the arrow to Foundry is blue and the arrow between the two pods is green.
+Green edges carry or establish a user identity. Grey edges do not — which is why
+the arrow to Foundry is grey and the arrow between the two pods is green.
 
 ## Getting started
 
@@ -145,7 +145,7 @@ azd auth login --tenant-id <tenant-id>
 azd env new demo
 azd env set AZURE_SUBSCRIPTION_ID <subscription-id>
 azd env set AZURE_LOCATION northeurope
-azd env set MCP_MODE orders          # or: databricks
+azd env set MCP_MODE graph           # or: databricks
 azd up
 ```
 
@@ -221,7 +221,7 @@ other's entry module.
 |---|---|
 | `src/mcp_server/obo.py` | The on-behalf-of exchange. Both modes call it; only `scope` differs |
 | `src/mcp_server/server.py` | Token verification, and the mode switch |
-| `src/mcp_server/orders.py` | orders mode: Graph OBO, authorization in the application |
+| `src/mcp_server/orders.py` | graph mode: Graph OBO, authorization in the application |
 | `src/mcp_server/databricks.py` | databricks mode: Databricks OBO, authorization in Unity Catalog |
 | `src/chat_app/` | Web login, safe session API, Agent Framework, delegated MCP calls |
 | `src/shared/` | The mode switch and the tool names both workloads read |
@@ -258,7 +258,7 @@ can outlive the resource group; remove the two generated app registrations if
 Full documentation is in the [docs](docs/README.md) folder:
 
 - [How the authorization actually works](docs/authorization.md)
-- [orders mode](docs/orders-mode.md)
+- [graph mode](docs/graph-mode.md)
 - [databricks mode](docs/databricks-mode.md)
 - [Local development](docs/localdev.md)
 - [Troubleshooting](docs/troubleshooting.md)

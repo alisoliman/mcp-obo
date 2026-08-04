@@ -15,19 +15,26 @@ from __future__ import annotations
 from functools import cache
 from pathlib import Path
 
-from src.shared.modes import DATABRICKS_MODE, current_mode
+from src.shared.modes import DATABRICKS_MODE, GRAPH_MODE, current_mode
 from src.shared.tools import DATABRICKS_TOOLS, ORDER_TOOLS
 
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
+# Keyed rather than branched, so a mode added to `MODES` without a tool set
+# raises here instead of silently being served another mode's.
+_TOOLS = {GRAPH_MODE: ORDER_TOOLS, DATABRICKS_MODE: DATABRICKS_TOOLS}
+
 
 def allowed_tools() -> frozenset[str]:
     """The tool names for the mode this deployment is running."""
-    return DATABRICKS_TOOLS if current_mode() == DATABRICKS_MODE else ORDER_TOOLS
+    return _TOOLS[current_mode()]
 
 
 def agent_instructions() -> str:
-    return _read("databricks" if current_mode() == DATABRICKS_MODE else "orders")
+    # The file is named for the mode, so the mode is the whole lookup. A mode
+    # with no `prompts/<mode>.md` raises FileNotFoundError rather than falling
+    # through to whichever branch happened to be last.
+    return _read(current_mode())
 
 
 @cache

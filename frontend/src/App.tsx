@@ -137,7 +137,7 @@ const THEME_KEY = "order-agent-theme"
    resource hangs off it, so the UI cannot claim Microsoft Graph in a
    deployment where Graph is never contacted. */
 const modes = {
-  orders: {
+  graph: {
     downstream: "Microsoft Graph",
     downstreamDetail: "Token exchange + Graph /me",
     mcpLabel: "Order MCP",

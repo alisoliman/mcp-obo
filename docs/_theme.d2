@@ -1,0 +1,118 @@
+# Shared style for every diagram in this directory. Imported with `...@_theme`.
+#
+# One question runs through all four diagrams: where is the user's identity? So
+# the palette answers only that, in three values.
+#
+#   green   the user's identity is here — a token, an assertion, or a claim
+#           about who the caller is
+#   grey    it is not — transport, inference, and data derived from an identity
+#           rather than the identity itself
+#   red     this path does not exist, and its absence is the point
+#
+# The distinction the grey line makes is the one worth holding: a result set
+# computed for a caller does not carry that caller, so the hops back out are
+# grey even though the hops in were green. Colouring them green would make the
+# green mean "related to the user", which is every edge in every diagram.
+#
+# Nothing else earns a colour. A diagram that needs a fourth is a diagram
+# trying to say two things at once.
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    pad: 16
+  }
+}
+
+classes: {
+  # A person. Only ever one per diagram.
+  actor: {
+    shape: person
+    style: {
+      fill: "#E3F3E9"
+      stroke: "#0F6C3C"
+      stroke-width: 2
+      font-color: "#12181F"
+    }
+  }
+
+  # Something that is an identity, or resolves one: a token, an app
+  # registration, the directory itself, the catalogue that decides what a named
+  # caller may see. Not a workload that merely handles the request — otherwise
+  # every box goes green and the colour stops meaning anything.
+  identity: {
+    style: {
+      fill: "#E3F3E9"
+      stroke: "#0F6C3C"
+      stroke-width: 2
+      font-color: "#12181F"
+      border-radius: 6
+    }
+  }
+
+  # A workload or service, considered without reference to who is calling it.
+  node: {
+    style: {
+      fill: "#FFFFFF"
+      stroke: "#8C959E"
+      stroke-width: 2
+      font-color: "#12181F"
+      border-radius: 6
+    }
+  }
+
+  # A boundary that owns what is inside it.
+  group: {
+    style: {
+      fill: "#F5F7F9"
+      stroke: "#DDE3E8"
+      stroke-width: 2
+      font-color: "#5B646C"
+      font-size: 20
+      border-radius: 8
+    }
+  }
+
+  # A phase of a sequence diagram. The same thing as `group`, but d2 sizes a
+  # sequence group's label at message size and a container's at 28px, so both
+  # are pinned here to keep one type scale across the four diagrams.
+  section: {
+    style: {
+      fill: "#F5F7F9"
+      stroke: "#DDE3E8"
+      stroke-width: 2
+      font-color: "#5B646C"
+      font-size: 20
+      border-radius: 8
+    }
+  }
+
+  # Edge: carries the user's identity.
+  carries: {
+    style: {
+      stroke: "#0F6C3C"
+      stroke-width: 2
+      font-color: "#0F6C3C"
+    }
+  }
+
+  # Edge: does not.
+  plain: {
+    style: {
+      stroke: "#8C959E"
+      stroke-width: 2
+      font-color: "#5B646C"
+    }
+  }
+
+  # Edge: deliberately absent. Drawn so you can see it is missing.
+  blocked: {
+    target-arrowhead.shape: cross
+    style: {
+      stroke: "#B3261E"
+      stroke-width: 2
+      stroke-dash: 4
+      font-color: "#B3261E"
+    }
+  }
+}

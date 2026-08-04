@@ -25,7 +25,7 @@ src/
   mcp_server/         the protected resource          -> Dockerfile.mcp  -> k8s/mcp
     server.py         token verification, the mode switch, the Origin check
     obo.py            the on-behalf-of exchange, its credential cache, its typed error
-    orders.py         orders mode: Graph OBO, authorization decided in this process
+    orders.py         graph mode: Graph OBO, authorization decided in this process
     databricks.py     databricks mode: Databricks OBO, authorization decided by Unity Catalog
     __main__.py       `python -m src.mcp_server`, the container entry point
   chat_app/           the confidential client         -> Dockerfile.chat -> k8s/chat
@@ -48,7 +48,7 @@ k8s/{mcp,chat}/       Deployment, Service, ServiceAccount, kustomization
 scripts/              operator entry points, run through `uv run python -m`
 frontend/             Vite + React, built into the chat image by ACR
 tests/                unit tests; `e2e_databricks.py` needs a deployment
-docs/                 the topic docs the README links out to
+docs/                 the topic docs the README links out to; the .d2 diagrams share _theme.d2
 ```
 
 The two workloads must not import each other. Each Dockerfile copies only its
@@ -145,30 +145,42 @@ through `uv run python -m`, which works identically on both.
 The `register(mcp, exchange, ...)` function is the seam. A mode is: one module
 under `src/mcp_server/` that exposes it, one scope constant in `obo.py`, one
 entry in `src/shared/modes.py`, one tool-name set in `src/shared/tools.py`, one
-prompt in `src/chat_app/prompts/`, and one branch in `create_server()`.
+prompt in `src/chat_app/prompts/`, one entry in `server.py`'s `_MODES`, one
+value in the Bicep `@allowed` list, and one key in the frontend's `modes`
+object. The last two fail late — at provision time, and as a blank page for
+that mode alone — so `tests/test_infrastructure.py` and
+`tests/test_contracts.py` assert both against `MODES`.
 
 1. `src/shared/modes.py` — add the constant and put it in `MODES`.
 2. `src/mcp_server/obo.py` — add the downstream scope. If the resource is a
    first-party Azure service, its application id is a fixed constant across
    tenants; say so in a comment the way `DATABRICKS_RESOURCE_APP_ID` does.
 3. `src/mcp_server/<mode>.py` — the tools, and a `register()` that takes the
-   `OboExchange`.
-4. `src/mcp_server/server.py` — add the branch in `create_server()` and the
-   display names in `_MODE_NAMES`.
+   `OboExchange`. Name the module for the mode.
+4. `src/mcp_server/server.py` — add the entry to `_MODES`: the two display
+   names, and the function that registers this mode's tools.
 5. `src/shared/tools.py` and `src/chat_app/prompts/<mode>.md` — the tool names
-   and the instructions. `src/chat_app/prompts.py` selects both by mode; extend
-   the two conditionals there.
-6. `infra/main.bicep` — the delegated permission for the new resource, inside
-   the mode-dependent `requiredResourceAccess` list. It must be `type: 'Scope'`.
+   and the instructions. Add the tool set to `_TOOLS` in
+   `src/chat_app/prompts.py`; the prompt file is found by mode name, so it needs
+   no entry anywhere.
+6. `infra/main.bicep` — add the name to the `deploymentMode` `@allowed` list,
+   and the delegated permission for the new resource inside the mode-dependent
+   `requiredResourceAccess` list. It must be `type: 'Scope'`.
    `tests/test_infrastructure.py` compiles the template and fails on
    `type: 'Role'`, and also asserts the number of permissions, so that count
    needs updating alongside.
-7. `tests/test_contracts.py` — add the mode.
-8. `README.md` and `docs/README.md` — the mode table, and a `docs/<mode>-mode.md`.
+7. `frontend/src/App.tsx` — add the key to `modes`, with the sample prompts and
+   copy the browser shows when that mode is deployed.
+8. `tests/test_contracts.py` — add the mode.
+9. `README.md` and `docs/README.md` — the mode table, and a `docs/<mode>-mode.md`.
+10. `.github/ISSUE_TEMPLATE/deployment-problem.yml` — add the name to the
+    `Which mode` dropdown. Nothing asserts this one; it stays wrong until
+    someone reporting a failure in the new mode has to pick another mode's
+    name.
 
 ## Changing what the agent is told
 
-`src/chat_app/prompts/orders.md` and `src/chat_app/prompts/databricks.md`. They
+`src/chat_app/prompts/graph.md` and `src/chat_app/prompts/databricks.md`. They
 are read at first use and cached, so a change needs a restart, not a rebuild of
 anything else. Nothing else in the repo holds instruction text.
 

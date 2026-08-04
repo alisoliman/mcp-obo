@@ -31,7 +31,7 @@ hooks:
         # Databricks mode only. Bicep stops at the workspace: metastores are
         # account-level, and catalogs, warehouses, grants, row filters and
         # column masks are all Databricks APIs. This one idempotent step fills
-        # that gap, and orders mode never reaches it.
+        # that gap, and graph mode never reaches it.
         if [ "$MCP_MODE" != "databricks" ]; then
           echo "MCP_MODE=$MCP_MODE; skipping the Unity Catalog bootstrap"
           exit 0
@@ -49,7 +49,7 @@ hooks:
         # Databricks mode only. Bicep stops at the workspace: metastores are
         # account-level, and catalogs, warehouses, grants, row filters and
         # column masks are all Databricks APIs. This one idempotent step fills
-        # that gap, and orders mode never reaches it.
+        # that gap, and graph mode never reaches it.
         if ($env:MCP_MODE -ne 'databricks') {
           Write-Host "MCP_MODE=$env:MCP_MODE; skipping the Unity Catalog bootstrap"
           exit 0

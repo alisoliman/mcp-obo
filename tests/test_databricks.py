@@ -43,10 +43,10 @@ class DatabricksToolTests(unittest.TestCase):
         for tool in tools:
             self.assertNotIn("access_token", tool.parameters.get("properties", {}))
 
-    def test_orders_mode_serves_only_the_order_tools(self) -> None:
-        # Databricks settings present but the mode says orders: the workspace
+    def test_graph_mode_serves_only_the_order_tools(self) -> None:
+        # Databricks settings present but the mode says graph: the workspace
         # config is ignored rather than quietly bolted on.
-        environment = dict(MCP_ENVIRONMENT, MCP_MODE="orders", **DATABRICKS_ENVIRONMENT)
+        environment = dict(MCP_ENVIRONMENT, MCP_MODE="graph", **DATABRICKS_ENVIRONMENT)
         with patch.dict("os.environ", environment, clear=False):
             mcp = server.create_server()
             tools = asyncio.run(mcp.list_tools())

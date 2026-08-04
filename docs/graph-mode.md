@@ -1,4 +1,4 @@
-# Orders mode
+# Graph mode
 
 **The persona:** you want to build your own MCP server on Azure, with real
 delegated identity, and your service owns its own data.
@@ -88,8 +88,9 @@ decision moved out of the process, so the server cannot get it wrong.
 3. Rename `scopeValue` in `infra/main.bicep` if you want a different scope, and
    add further downstream permissions to `serverApp.requiredResourceAccess`
    alongside a matching `oauth2PermissionGrants` resource.
-4. Rewrite `src/chat_app/prompts/orders.md` for your domain.
+4. Rewrite `src/chat_app/prompts/graph.md` for your domain.
 
-The identity plumbing does not change. Reaching a third downstream resource is
-one more scope constant and one more module with a `register` function — see
-[the authorization model](authorization.md).
+The identity plumbing does not change. The mode name does, in more places than
+this file: a scope constant, a module, a tool-name set, a prompt, the Bicep
+`@allowed` list, the frontend and the issue template. The checklist is
+[Adding a new mode](../AGENTS.md#adding-a-new-mode) in `AGENTS.md`.
