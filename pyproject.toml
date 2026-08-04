@@ -4,17 +4,17 @@ version = "0.1.0"
 description = "Delegated identity for MCP servers on Azure: every tool call runs as the person who asked."
 requires-python = ">=3.13"
 dependencies = [
-    "agent-framework-foundry>=1.10.1",
-    "fastmcp[azure]==3.2.4",
+    "agent-framework-foundry>=1.10.4",
+    "fastmcp[azure]==3.4.5",
     "msal>=1.37.0",
     "starlette>=1.3.1",
-    "uvicorn>=0.51.0",
+    "uvicorn>=0.52.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3",
-    "ruff>=0.14",
+    "ruff>=0.16.1",
 ]
 
 [tool.ruff]
