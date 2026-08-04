@@ -70,9 +70,9 @@ DEMO_OWNERS = [
     for owner in ENV.get("DATABRICKS_DEMO_OWNERS", "").split(",")
     if owner.strip()
 ]
-# An orders-mode deployment serves none of these tools, so the whole module
+# A graph-mode deployment serves none of these tools, so the whole module
 # skips rather than failing on tools that were never meant to be there.
-MODE = ENV.get("MCP_MODE", "orders").strip().lower() or "orders"
+MODE = ENV.get("MCP_MODE", "graph").strip().lower() or "graph"
 CONFIGURED = bool(
     MODE == "databricks" and MCP_ENDPOINT and SERVER_APP_ID and DATABRICKS_HOST
 )

@@ -96,7 +96,7 @@ serving -- not for working on a chat turn. For a turn, deploy.
 export AZURE_TENANT_ID=...
 export ENTRA_SERVER_CLIENT_ID=...
 export MCP_SERVER_URL=http://localhost:8000
-export MCP_MODE=orders
+export MCP_MODE=graph
 export AZURE_FEDERATED_TOKEN_FILE=/dev/null
 
 uv run python -m src.mcp_server
@@ -117,6 +117,9 @@ for name in architecture token-flow trust-boundaries databricks-obo; do
   d2 "docs/$name.d2" "docs/$name.svg"
 done
 ```
+
+All four share `docs/_theme.d2`, so editing the shared style leaves every SVG
+stale, not just the one you were looking at.
 
 ## Deploying a code change
 

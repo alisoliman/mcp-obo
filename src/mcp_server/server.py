@@ -10,7 +10,7 @@ Everything identity-related happens here, and it is the same in both modes:
 
 `MCP_MODE` then decides which downstream resource that is:
 
-    orders      -> src/mcp_server/orders.py      -> Microsoft Graph
+    graph       -> src/mcp_server/orders.py      -> Microsoft Graph
     databricks  -> src/mcp_server/databricks.py  -> Azure Databricks + Unity Catalog
 
 The two are alternatives, not layers, so a reader follows exactly one path.
@@ -21,6 +21,7 @@ is nothing to exchange.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -35,7 +36,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from src.mcp_server import databricks as databricks_tools
 from src.mcp_server import orders as order_tools
 from src.mcp_server.obo import OboExchange
-from src.shared.modes import DATABRICKS_MODE, ORDERS_MODE, current_mode
+from src.shared.modes import DATABRICKS_MODE, GRAPH_MODE, current_mode
 
 # Pinned rather than left to the fastmcp default, because infra/main.bicep
 # publishes `MCP_ENDPOINT` as this exact path.
@@ -46,9 +47,33 @@ MCP_PATH = "/mcp"
 # check below lets through.
 DISCOVERY_PREFIX = "/.well-known/"
 
-_MODE_NAMES = {
-    ORDERS_MODE: ("Order Handling", "FastMCP Order Handling"),
-    DATABRICKS_MODE: ("Databricks Orders", "FastMCP Databricks Orders"),
+
+def _register_order_tools(mcp: FastMCP, exchange: OboExchange) -> None:
+    order_tools.register(mcp, exchange)
+
+
+def _register_databricks_tools(mcp: FastMCP, exchange: OboExchange) -> None:
+    settings = databricks_tools.DatabricksSettings.from_env()
+    if settings is None:
+        raise RuntimeError(
+            "MCP_MODE=databricks requires DATABRICKS_HOST. Run "
+            "`azd provision` with deploymentMode=databricks, which deploys "
+            "the workspace and produces it."
+        )
+    databricks_tools.register(mcp, exchange, settings)
+
+
+# Display names and tool registration in one entry per mode, because they used
+# to be a dict and an `if`/`else` beside it: a mode added to the dict but not to
+# the branch registered the other mode's tools and started clean. Keyed on the
+# mode, a missing entry raises here instead.
+_MODES: dict[str, tuple[str, str, Callable[[FastMCP, OboExchange], None]]] = {
+    GRAPH_MODE: ("Order Handling", "FastMCP Order Handling", _register_order_tools),
+    DATABRICKS_MODE: (
+        "Databricks Orders",
+        "FastMCP Databricks Orders",
+        _register_databricks_tools,
+    ),
 }
 
 
@@ -121,7 +146,7 @@ def create_server() -> FastMCP:
             "/var/run/secrets/azure/tokens/azure-identity-token",
         )
     )
-    server_name, resource_name = _MODE_NAMES[mode]
+    server_name, resource_name, register_tools = _MODES[mode]
 
     verifier = AzureJWTVerifier(
         client_id=client_id,
@@ -157,16 +182,6 @@ def create_server() -> FastMCP:
         assertion=workload_assertion,
     )
 
-    if mode == ORDERS_MODE:
-        order_tools.register(mcp, exchange)
-    else:
-        settings = databricks_tools.DatabricksSettings.from_env()
-        if settings is None:
-            raise RuntimeError(
-                "MCP_MODE=databricks requires DATABRICKS_HOST. Run "
-                "`azd provision` with deploymentMode=databricks, which deploys "
-                "the workspace and produces it."
-            )
-        databricks_tools.register(mcp, exchange, settings)
+    register_tools(mcp, exchange)
 
     return mcp

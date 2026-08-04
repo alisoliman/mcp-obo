@@ -1,4 +1,4 @@
-"""Orders mode: the rules the application enforces in Python."""
+"""Graph mode: the rules the application enforces in Python."""
 
 from __future__ import annotations
 

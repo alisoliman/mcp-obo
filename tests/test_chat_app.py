@@ -317,7 +317,7 @@ class ChatTests(unittest.TestCase):
             {
                 "authenticated": False,
                 "model": "gpt-5.6-terra",
-                "mode": "orders",
+                "mode": "graph",
                 "mcp": {"tools": sorted(allowed_tools())},
             },
         )

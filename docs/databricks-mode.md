@@ -9,12 +9,12 @@ MCP server sends one fixed statement and gets back rows that are already scoped.
 
 ![The second on-behalf-of exchange](databricks-obo.svg)
 
-## What changes from orders mode
+## What changes from graph mode
 
 Two things. Everything else — both app registrations, both federated
 credentials, the JWT verification, the exchange itself — is untouched.
 
-| | orders mode | databricks mode |
+| | graph mode | databricks mode |
 |---|---|---|
 | OBO scope | `https://graph.microsoft.com/.default` | `2ff814a6-…/.default` |
 | Who decides what you see | `src/mcp_server/orders.py`, by hand | Unity Catalog |

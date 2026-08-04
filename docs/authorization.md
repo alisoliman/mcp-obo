@@ -61,9 +61,12 @@ scope                 = <-- the only difference
 ```
 
 ```
-orders mode      scope = https://graph.microsoft.com/.default
+graph mode       scope = https://graph.microsoft.com/.default
 databricks mode  scope = 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default
 ```
+
+A mode is named for the resource on that `scope` line, not for where the
+decision is made.
 
 Two assertions, two different jobs:
 
@@ -138,13 +141,12 @@ signs in again.
 
 And this is where the two modes genuinely diverge:
 
-| | orders mode | databricks mode |
+| | graph mode — Microsoft Graph | databricks mode — Azure Databricks |
 |---|---|---|
-| Resource | Microsoft Graph | Azure Databricks |
-| Checks | Its own permission model: `User.Read` lets you read your own profile | Workspace membership, then Unity Catalog grants, row filters and column masks |
+| Checks | Graph's own permission model: `User.Read` lets you read your own profile | Workspace membership, then Unity Catalog grants, row filters and column masks |
 | Then what | `src/mcp_server/orders.py` partitions an in-memory dict by the object id Graph returned | Nothing. The rows arrive already filtered |
 
-Gate 3 is the argument for the whole accelerator. In orders mode the
+Gate 3 is the argument for the whole accelerator. In graph mode the
 application is the last line of defence, and it is correct only for as long as
 every tool remembers to filter. In databricks mode the server could not return
 another user's rows if it tried, because it never received them.
@@ -200,7 +202,7 @@ records.
 
 In databricks mode, Graph is never contacted at runtime at all — and the
 template requests no Graph permission and writes no Graph consent record in that
-mode either. The delegated `User.Read` exists in orders mode only.
+mode either. The delegated `User.Read` exists in graph mode only.
 
 ## Reading it in the code
 
@@ -212,6 +214,12 @@ mode either. The delegated `User.Read` exists in orders mode only.
 | [`src/mcp_server/databricks.py`](../src/mcp_server/databricks.py) | Gate 3 delegated to Unity Catalog |
 | [`infra/main.bicep`](../infra/main.bicep) | The delegated permissions and consent that make gate 2 pass |
 
+The first diagram walks the exchange one message at a time. The second asks what
+each credential reaches with no other credential present — its red dashed edges,
+crossed at the head, are the paths that do not exist: the chat workload holds no
+application permission on order data, and the MCP workload's `/me` resolves
+nobody without a caller.
+
 ![Token flow](token-flow.svg)
 
-![What each credential reaches on its own](trust-boundaries.svg)
+![The chat pod's workload identity reaches Foundry, but its path to order data is crossed out, as is the MCP pod's. Only the user's delegated token and the MCP pod's client assertion together reach the on-behalf-of exchange, and from there the caller's orders.](trust-boundaries.svg)

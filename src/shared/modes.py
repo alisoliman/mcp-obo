@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import os
 
-ORDERS_MODE = "orders"
+GRAPH_MODE = "graph"
 DATABRICKS_MODE = "databricks"
-MODES = (ORDERS_MODE, DATABRICKS_MODE)
+MODES = (GRAPH_MODE, DATABRICKS_MODE)
 
 
 def current_mode() -> str:
-    mode = os.getenv("MCP_MODE", ORDERS_MODE).strip().lower() or ORDERS_MODE
+    mode = os.getenv("MCP_MODE", GRAPH_MODE).strip().lower() or GRAPH_MODE
     if mode not in MODES:
         raise RuntimeError(f"MCP_MODE must be one of {', '.join(MODES)}, got {mode!r}")
     return mode

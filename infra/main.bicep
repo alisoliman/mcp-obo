@@ -20,17 +20,17 @@ param modelCapacity int = 100
 
 @description('''Which example to deploy. These are alternatives, not layers.
 
-  orders      The MCP server authorizes, using Microsoft Graph to resolve the
+  graph       The MCP server authorizes, using Microsoft Graph to resolve the
               caller. Start here to build your own MCP server on Azure.
   databricks  Unity Catalog authorizes. Adds a premium Databricks workspace and
               the delegated Databricks permission.
 
 See docs/authorization.md — the identity path is identical in both.''')
 @allowed([
-  'orders'
+  'graph'
   'databricks'
 ])
-param deploymentMode string = 'orders'
+param deploymentMode string = 'graph'
 
 @description('''Optional app id allowed to request the MCP scope, for automated
 verification only. Empty (the default) means the chat client is the only
@@ -57,7 +57,7 @@ new Log Analytics workspace. Off by default because Log Analytics is billable an
 the README lists "no telemetry" among the deliberate limits, but the
 accelerator's central claim — that Unity Catalog sees the end user, not the MCP
 server, behind every query — is only checkable with this on. A string rather than
-a bool for the same reason as above. Ignored in orders mode.''')
+a bool for the same reason as above. Ignored in graph mode.''')
 param enableDatabricksAuditLogs string = 'false'
 
 var suffix = uniqueString(subscription().id, resourceGroup().id, environmentName)
@@ -436,7 +436,7 @@ resource serverApp 'Microsoft.Graph/applications@v1.0' = {
     requestedAccessTokenVersion: 2
   }
   requiredResourceAccess: concat(
-    // Only orders mode ever calls Graph, and only to resolve the caller's own
+    // Only graph mode ever calls Graph, and only to resolve the caller's own
     // profile. A databricks-mode server talks to Databricks and nothing else, so
     // it does not carry a tenant-consented Graph permission it would never use.
     deployDatabricks
@@ -638,7 +638,7 @@ output INGRESS_PUBLIC_IP_RESOURCE_GROUP string = resourceGroup().name
 output FOUNDRY_PROJECT_ENDPOINT string = foundryProject.properties.endpoints['AI Foundry API']
 output FOUNDRY_MODEL_DEPLOYMENT_NAME string = modelDeployment.name
 output MCP_MODE string = deploymentMode
-// Empty in orders mode. `MCP_MODE` is what selects the tool set; the MCP server
+// Empty in graph mode. `MCP_MODE` is what selects the tool set; the MCP server
 // refuses to start if it is set to databricks without this host.
 output DATABRICKS_HOST string = deployDatabricks
   ? 'https://${databricks!.properties.workspaceUrl}'
