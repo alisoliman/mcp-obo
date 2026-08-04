@@ -4,3 +4,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 k8s/**/.env
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/

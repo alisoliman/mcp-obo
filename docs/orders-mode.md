@@ -59,11 +59,11 @@ Keep the single MCP pod running throughout, because the store is in memory.
 
 ## Where the authorization happens
 
-In `src/orders.py`, and it is worth being honest about this:
+In `src/mcp_server/orders.py`, and it is worth being honest about this:
 
 ```python
-user = await current_user(access_token)   # Graph /me, over OBO
-return list_orders_for(user.id)           # <-- the authorization decision
+user = await current_user(access_token)  # Graph /me, over OBO
+return list_orders_for(user.id)  # <-- the authorization decision
 ```
 
 That second line is the entire access control. It is correct only for as long
@@ -76,7 +76,7 @@ decision moved out of the process, so the server cannot get it wrong.
 
 ## Adapting it to your own tools
 
-1. Replace the tool functions in `src/orders.py`. Keep the
+1. Replace the tool functions in `src/mcp_server/orders.py`. Keep the
    `access_token: AccessToken = CurrentAccessToken()` parameter and the
    `current_user(access_token)` call at the top of each one. That pair is the
    whole mechanism by which a tool becomes user-scoped. An Entra refusal inside
@@ -88,7 +88,7 @@ decision moved out of the process, so the server cannot get it wrong.
 3. Rename `scopeValue` in `infra/main.bicep` if you want a different scope, and
    add further downstream permissions to `serverApp.requiredResourceAccess`
    alongside a matching `oauth2PermissionGrants` resource.
-4. Rewrite `ORDERS_INSTRUCTIONS` in `src/chat.py` for your domain.
+4. Rewrite `src/chat_app/prompts/orders.md` for your domain.
 
 The identity plumbing does not change. Reaching a third downstream resource is
 one more scope constant and one more module with a `register` function — see

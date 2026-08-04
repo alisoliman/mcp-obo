@@ -1,0 +1,40 @@
+version: 2
+updates:
+  # A sample that pins `fastmcp==3.2.4` and ships an identity pattern needs
+  # something watching those pins. Grouped so an upgrade arrives as one
+  # reviewable pull request rather than fifteen.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      python:
+        patterns: ["*"]
+    labels: ["dependencies"]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      frontend:
+        patterns: ["*"]
+    labels: ["dependencies"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: ["dependencies"]
+
+  - package-ecosystem: docker
+    directories:
+      - /
+    schedule:
+      interval: monthly
+    labels: ["dependencies"]

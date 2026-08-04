@@ -17,7 +17,7 @@ credentials, the JWT verification, the exchange itself — is untouched.
 | | orders mode | databricks mode |
 |---|---|---|
 | OBO scope | `https://graph.microsoft.com/.default` | `2ff814a6-…/.default` |
-| Who decides what you see | `src/orders.py`, by hand | Unity Catalog |
+| Who decides what you see | `src/mcp_server/orders.py`, by hand | Unity Catalog |
 
 ## What it deploys
 
@@ -139,7 +139,7 @@ orders, filters and table grants. It still resolves `DATABRICKS_DEMO_OWNERS` and
 grants them CAN USE on the warehouse, because that is compute rather than data
 and someone pointed at real data needs it just as much. That is the starting
 point for pointing the server at real data: change `orders_statement` in
-`src/databricks.py`, set `DATABRICKS_CATALOG` and `DATABRICKS_SCHEMA`, and keep
+`src/mcp_server/databricks.py`, set `DATABRICKS_CATALOG` and `DATABRICKS_SCHEMA`, and keep
 the statement a fixed literal with bound parameters.
 
 It also creates a 2X-Small serverless SQL warehouse with a ten-minute auto-stop,
@@ -185,7 +185,7 @@ that grant by hand.
 ## Verifying it
 
 ```bash
-uv run python -m unittest test_databricks_e2e -v
+uv run pytest tests/e2e_databricks.py
 ```
 
 Runs against the real deployment and asserts that SCIM and SQL `current_user()`

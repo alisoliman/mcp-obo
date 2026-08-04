@@ -9,9 +9,18 @@ infra:
   path: infra
 
 hooks:
+  # Every hook is declared twice, once per shell. azd runs the block matching
+  # the host it is on, and a hook with only a `posix` block silently does
+  # nothing on Windows -- which here would mean deploying without the ingress
+  # controller and without the Unity Catalog objects. The two blocks have to
+  # stay in step; AGENTS.md says so where someone changing one would read it.
   preprovision:
     posix:
       shell: sh
+      interactive: false
+      run: azd config set alpha.aks.kustomize on
+    windows:
+      shell: pwsh
       interactive: false
       run: azd config set alpha.aks.kustomize on
   postprovision:
@@ -31,6 +40,26 @@ hooks:
         echo "$warehouse" | while IFS='=' read -r key value; do
           [ -n "$key" ] && azd env set "$key" "$value"
         done
+    windows:
+      shell: pwsh
+      interactive: false
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        # Databricks mode only. Bicep stops at the workspace: metastores are
+        # account-level, and catalogs, warehouses, grants, row filters and
+        # column masks are all Databricks APIs. This one idempotent step fills
+        # that gap, and orders mode never reaches it.
+        if ($env:MCP_MODE -ne 'databricks') {
+          Write-Host "MCP_MODE=$env:MCP_MODE; skipping the Unity Catalog bootstrap"
+          exit 0
+        }
+        $warehouse = uv run python -m scripts.bootstrap_databricks --print-env
+        foreach ($line in @($warehouse)) {
+          if ($line -match '^([^=]+)=(.*)$') {
+            azd env set $Matches[1] $Matches[2].Trim()
+          }
+        }
   predeploy:
     posix:
       shell: sh
@@ -60,6 +89,40 @@ hooks:
           --create-namespace \
           --set crds.enabled=true \
           --wait \
+          --timeout 10m
+    windows:
+      shell: pwsh
+      interactive: false
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        az aks get-credentials `
+          --subscription $env:AZURE_SUBSCRIPTION_ID `
+          --resource-group $env:AZURE_RESOURCE_GROUP `
+          --name $env:AZURE_AKS_CLUSTER_NAME `
+          --overwrite-existing
+        kubelogin convert-kubeconfig --login azurecli
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx --force-update
+        helm repo add jetstack https://charts.jetstack.io --force-update
+        # PowerShell does not treat a backslash as an escape, so the dotted
+        # annotation keys Helm needs are written literally inside the quotes
+        # rather than quoted a second time the way sh requires.
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx `
+          --version 4.15.1 `
+          --namespace ingress-nginx `
+          --create-namespace `
+          --set "controller.service.loadBalancerIP=$env:INGRESS_IP" `
+          --set-string "controller.service.annotations.service\.beta\.kubernetes\.io/azure-load-balancer-resource-group=$env:INGRESS_PUBLIC_IP_RESOURCE_GROUP" `
+          --set-string "controller.service.annotations.service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path=/healthz" `
+          --atomic `
+          --wait `
+          --timeout 10m
+        helm upgrade --install cert-manager jetstack/cert-manager `
+          --version v1.21.0 `
+          --namespace cert-manager `
+          --create-namespace `
+          --set crds.enabled=true `
+          --wait `
           --timeout 10m
 
 services:

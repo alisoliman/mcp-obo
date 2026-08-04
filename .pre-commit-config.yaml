@@ -1,0 +1,23 @@
+# Run these before committing:  uv run pre-commit install
+#
+# The same checks CI runs, so a red build is something you can reproduce in a
+# second rather than something you discover in a pull request.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+        # The kustomize overlays and Helm-style manifests parse fine; azure.yaml
+        # carries the azd schema comment that check-yaml is happy with.
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.2
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

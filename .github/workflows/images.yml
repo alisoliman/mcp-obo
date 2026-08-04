@@ -1,0 +1,81 @@
+name: Images
+
+# Both images are built the way ACR builds them, and then asked to import their
+# own entry module. That import is the enforcement behind the layout: each
+# Dockerfile copies only its own tree plus `src/shared`, so a chat module that
+# reaches into `src.mcp_server` -- or the reverse -- fails here rather than
+# shipping the other workload's code inside the image.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "frontend/**"
+      - "Dockerfile.*"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".dockerignore"
+      - ".github/workflows/images.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "frontend/**"
+      - "Dockerfile.*"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".dockerignore"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.workload }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workload: mcp
+            dockerfile: Dockerfile.mcp
+            module: src.mcp_server.server
+          - workload: chat
+            dockerfile: Dockerfile.chat
+            module: src.chat_app.app
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: mcp-obo-${{ matrix.workload }}:ci
+          cache-from: type=gha,scope=${{ matrix.workload }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.workload }}
+
+      - name: The image can import its own entry module
+        # Importing rather than running: the entry points bind a port, and
+        # nothing here has an Entra tenant to talk to. An import is enough to
+        # prove every module the workload needs is actually in the image.
+        run: >
+          docker run --rm mcp-obo-${{ matrix.workload }}:ci
+          python -c "import ${{ matrix.module }}"
+
+      - name: The other workload's code is absent
+        run: |
+          other=${{ matrix.workload == 'mcp' && 'src.chat_app.app' || 'src.mcp_server.server' }}
+          if docker run --rm mcp-obo-${{ matrix.workload }}:ci \
+              python -c "import $other" 2>/dev/null; then
+            echo "::error::$other is importable inside the ${{ matrix.workload }} image;"\
+                 "the two workloads are supposed to ship separately"
+            exit 1
+          fi
+          echo "$other is absent, as intended"

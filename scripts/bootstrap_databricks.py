@@ -27,8 +27,8 @@ from azure.core.credentials import AccessToken, TokenCredential
 from azure.core.exceptions import ClientAuthenticationError
 from azure.identity import AzureCliCredential
 
-from src.databricks import IDENTIFIER
-from src.obo import DATABRICKS_SCOPE
+from src.mcp_server.databricks import IDENTIFIER
+from src.mcp_server.obo import DATABRICKS_SCOPE
 
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 ARM_SCOPE = "https://management.core.windows.net/.default"
@@ -146,13 +146,48 @@ class Databricks:
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
-        allow: tuple[int, ...] = (),
+    ) -> dict[str, Any]:
+        """The parsed body. Any error status raises.
+
+        Split from `call_allowing` so that the nine call sites which cannot
+        receive None do not have to narrow a type that only the other five can
+        actually produce.
+        """
+        body = self._request(method, url, params=params, json_body=json_body, allow=())
+        if body is None:
+            # Unreachable: only a status listed in `allow` returns None, and
+            # this passes none. Stated rather than asserted, because a silent
+            # `or {}` here would turn a changed contract into an empty result.
+            raise BootstrapError(f"{method} {url} returned no body")
+        return body
+
+    def call_allowing(
+        self,
+        method: str,
+        url: str,
+        *,
+        allow: tuple[int, ...],
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Return the parsed body, or None when the status was in `allow`.
+        """The parsed body, or None when the status was in `allow`.
 
         `allow` exists so "does this already exist?" reads as `is None` at the
         call site rather than as a sentinel dict pretending to be a response.
         """
+        return self._request(
+            method, url, params=params, json_body=json_body, allow=allow
+        )
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None,
+        json_body: dict[str, Any] | None,
+        allow: tuple[int, ...],
+    ) -> dict[str, Any] | None:
         response = self._client.request(
             method, url, params=params, json=json_body, headers=self._headers()
         )
@@ -182,7 +217,7 @@ def ensure_metastore(api: Databricks, config: Config) -> None:
     one is an account-level operation, so a tenant with that automatic
     assignment switched off has to do it by hand before running this.
     """
-    current = api.call(
+    current = api.call_allowing(
         "GET",
         f"{config.host}/api/2.1/unity-catalog/metastore_summary",
         allow=(404, 400),
@@ -220,11 +255,11 @@ def ensure_catalog(api: Databricks, config: Config) -> str:
     # is here to keep the two facts independent rather than to fix a live bug.
     name = url_quote(config.catalog, safe="")
 
-    if api.call("GET", f"{uc}/catalogs/{name}", allow=(404,)) is not None:
+    if api.call_allowing("GET", f"{uc}/catalogs/{name}", allow=(404,)) is not None:
         log(f"catalog already exists: {config.catalog}")
         return config.catalog
 
-    created = api.call(
+    created = api.call_allowing(
         "POST",
         f"{uc}/catalogs",
         json_body={
@@ -322,7 +357,7 @@ def start_warehouse(api: Databricks, config: Config, warehouse_id: str) -> str:
                 raise BootstrapError(
                     f"warehouse fell back to STOPPED after {starts - 1} starts"
                 )
-            api.call("POST", f"{url}/start", allow=(400,))
+            api.call_allowing("POST", f"{url}/start", allow=(400,))
         time.sleep(10)
     raise BootstrapError("warehouse did not reach RUNNING within 10 minutes")
 
@@ -407,9 +442,7 @@ def run_sql(
     deadline = time.time() + 600
     while state in {"PENDING", "RUNNING"} and time.time() < deadline:
         time.sleep(3)
-        body = api.call(
-            "GET", f"{config.host}/api/2.0/sql/statements/{statement_id}"
-        )
+        body = api.call("GET", f"{config.host}/api/2.0/sql/statements/{statement_id}")
         state = body.get("status", {}).get("state")
 
     if state != "SUCCEEDED":
@@ -439,7 +472,7 @@ def resolve_owner(api: Databricks, config: Config, address: str) -> str:
         raise BootstrapError(
             f"DATABRICKS_DEMO_OWNERS entry {address!r} is not a sign-in address"
         )
-    found = api.call(
+    found = api.call_allowing(
         "GET",
         f"{config.host}/api/2.0/preview/scim/v2/Users",
         params={"filter": f'userName eq "{address}"', "count": 1},
@@ -599,8 +632,8 @@ def seed(
             ]
     # Bound, not formatted in. `o'brien@contoso.com` is an ordinary sign-in name
     # and possibly the deployer's own, and as a quoted literal it turns the seed
-    # into a syntax error. This is the same mechanism `src/databricks.py` uses
-    # for the caller's own query.
+    # into a syntax error. This is the same mechanism
+    # `src/mcp_server/databricks.py` uses for the caller's own query.
     try:
         sql(f"INSERT INTO {orders} VALUES {', '.join(tuples)}", parameters)
     except BootstrapError as error:

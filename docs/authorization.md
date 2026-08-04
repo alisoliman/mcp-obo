@@ -79,7 +79,7 @@ application-only. Without a caller there is nothing to put there.
 for that resource", rather than naming scopes one at a time.
 
 In code this is `OboExchange.token(user_assertion, scope)` in
-[`src/obo.py`](../src/obo.py). The request above is a handful of arguments; the
+[`src/mcp_server/obo.py`](../src/mcp_server/obo.py). The request above is a handful of arguments; the
 rest of that file is a per-caller credential cache and a typed Entra error. No
 credential is stored anywhere: the cache holds live credential objects in this
 process's memory, keyed by a hash of the caller's own token, dropped a minute
@@ -128,7 +128,7 @@ satisfying one means relaying it: the server would have to answer `401` with a
 `WWW-Authenticate` carrying the claims, and the chat client would have to
 declare the `cp1` capability so Entra knows it can handle one. Neither is built,
 so a step-up is not recoverable inside this app. What is built is the diagnosis.
-`OboError` in `src/obo.py` keeps Entra's error code, the AADSTS numbers and the
+`OboError` in `src/mcp_server/obo.py` keeps Entra's error code, the AADSTS numbers and the
 claims challenge, and reaches the user as a `ToolError` rather than being
 flattened by `mask_error_details` into an indistinguishable failure — so
 AADSTS50076 reads as the policy it is, and the user satisfies it out of band and
@@ -142,7 +142,7 @@ And this is where the two modes genuinely diverge:
 |---|---|---|
 | Resource | Microsoft Graph | Azure Databricks |
 | Checks | Its own permission model: `User.Read` lets you read your own profile | Workspace membership, then Unity Catalog grants, row filters and column masks |
-| Then what | `src/orders.py` partitions an in-memory dict by the object id Graph returned | Nothing. The rows arrive already filtered |
+| Then what | `src/mcp_server/orders.py` partitions an in-memory dict by the object id Graph returned | Nothing. The rows arrive already filtered |
 
 Gate 3 is the argument for the whole accelerator. In orders mode the
 application is the last line of defence, and it is correct only for as long as
@@ -206,10 +206,10 @@ mode either. The delegated `User.Read` exists in orders mode only.
 
 | File | What to look for |
 |---|---|
-| [`src/obo.py`](../src/obo.py) | The exchange. Both modes call it; only `scope` differs |
-| [`src/server.py`](../src/server.py) | Gate 1, and the mode switch |
-| [`src/orders.py`](../src/orders.py) | Gate 3 done by the application |
-| [`src/databricks.py`](../src/databricks.py) | Gate 3 delegated to Unity Catalog |
+| [`src/mcp_server/obo.py`](../src/mcp_server/obo.py) | The exchange. Both modes call it; only `scope` differs |
+| [`src/mcp_server/server.py`](../src/mcp_server/server.py) | Gate 1, and the mode switch |
+| [`src/mcp_server/orders.py`](../src/mcp_server/orders.py) | Gate 3 done by the application |
+| [`src/mcp_server/databricks.py`](../src/mcp_server/databricks.py) | Gate 3 delegated to Unity Catalog |
 | [`infra/main.bicep`](../infra/main.bicep) | The delegated permissions and consent that make gate 2 pass |
 
 ![Token flow](token-flow.svg)
