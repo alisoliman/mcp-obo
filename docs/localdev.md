@@ -18,22 +18,12 @@ uv sync
 uv run pytest
 ```
 
-No Azure, no deployment, no secrets, about six seconds. This covers the order
-rules and per-user isolation, the mode switch, the MCP token, scope and origin
-requirements, the tool annotations, the Databricks host and identifier checks,
-the browser session and CSRF behaviour, the polling and retry loops driven
-against a scripted transport, that the tool names the chat app allows are the
-ones the server registers, and that the compiled Bicep template requests no
-application permission.
+No Azure, no deployment, no secrets, about six seconds. What it does not cover
+is whether a deployment works; see [Verify it](../README.md#verify-it) for what
+each tool in the chain is responsible for.
 
-What it does not cover is whether a deployment works. Nothing here talks to
-Azure. Everything else is checked by the tool that owns it: Bicep for the
-template, `azd provision --preview` for the plan, and the two image builds for
-the Dockerfiles.
-
-`tests/e2e_databricks.py` is the module that does talk to a live deployment. It
-does not match pytest's `test_*.py` collection pattern, so a bare `pytest` never
-picks it up. Run it by name, after `azd up`:
+`tests/e2e_databricks.py` is the module that does talk to a live deployment, and
+a bare `pytest` never collects it. Run it by name, after `azd up`:
 
 ```bash
 uv run pytest tests/e2e_databricks.py
@@ -103,9 +93,9 @@ uv run python -m src.mcp_server
 ```
 
 It will start, serve its RFC 9728 discovery documents, and reject every tool
-call: `AzureJWTVerifier` still validates real tokens against your tenant, and the
-on-behalf-of exchange still needs a client assertion it cannot produce. That is
-enough to work on the discovery documents, the `Origin` check and the tool
+call: `AzureJWTVerifier` still validates real tokens against your tenant, and
+the on-behalf-of exchange still needs a client assertion it cannot produce. That
+is enough to work on the discovery documents, the `Origin` check and the tool
 schemas.
 
 ## Rebuilding the diagrams
@@ -120,17 +110,3 @@ done
 
 All four share `docs/_theme.d2`, so editing the shared style leaves every SVG
 stale, not just the one you were looking at.
-
-## Deploying a code change
-
-If you changed only application code, you do not need to re-provision:
-
-```bash
-azd deploy
-```
-
-If you changed `infra/` or `azure.yaml`, you do:
-
-```bash
-azd up
-```

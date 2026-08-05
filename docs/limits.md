@@ -1,11 +1,9 @@
 # What this sample deliberately does not do
 
-Everything here is a decision, not an oversight. A demonstration of a delegated
-identity pattern is not a hardened deployment, and the difference is worth
-stating precisely rather than leaving for someone to discover in production.
-
-Read this before adapting the sample. Several of these are the exact things you
-would have to build.
+This sample demonstrates a delegated identity pattern. It is not a hardened
+deployment. The limits below are intentional, and most of them are things a
+production deployment would have to add. Read this page before adapting the
+sample.
 
 ## The agent has no approval gate
 
@@ -25,16 +23,6 @@ restricted to http/https/mailto, and all three Databricks tools are annotated
 What is not in place is any human approval gate. Build one before pointing this
 at a tool that mutates anything.
 
-## The transcript is not confined to the browser tab
-
-`src/chat_app/app.py` creates an `AgentSession` per browser session and never
-sets `store`, and the Responses path behind Foundry returns and persists a
-conversation id unless it is `False`.
-
-So governed rows, order ids, owner addresses, amounts and the resolved identity
-become part of a Foundry-side conversation that is not row filtered on later
-access, is not in the Databricks audit log, and is not deleted at logout.
-
 ## One replica, and sessions in its memory
 
 Web sessions live in that pod's memory, capped at 2000, and end after 30 minutes
@@ -43,9 +31,24 @@ replica would break sessions outright.
 
 ## Generic MCP clients cannot sign in
 
-Only clients registered in advance can authorize against this server; discovery
-is not enough. The reasons are Entra's and are spelled out in
-[the authorization model](authorization.md#why-a-generic-mcp-client-cannot-sign-in-here).
+The server half of the MCP authorization spec is implemented: `/mcp` serves RFC
+9728 protected resource metadata and answers an unauthenticated call with a
+`WWW-Authenticate` challenge carrying `resource_metadata`, so a client can
+discover which authorization server to go to. It still cannot finish, for two
+reasons that belong to Entra rather than to this repo:
+
+- The spec says a client MUST send the RFC 8707 `resource` parameter naming the
+  canonical MCP server URI. Entra does not implement resource indicators. The
+  audience comes from the scope, which here is
+  `api://<server-app-id>/Mcp.Tools.ReadWrite` and can never equal the server's
+  URL.
+- Entra's OIDC metadata omits `code_challenge_methods_supported`, and the spec
+  tells a client that finds it missing to refuse to proceed.
+
+So authorization works only for clients registered against the server
+application in advance: the chat app, and the Azure CLI when
+`HARNESS_CLIENT_APP_ID` pre-authorizes it. Point a generic MCP client at `/mcp`
+and it fails during discovery, not at the token endpoint.
 
 ## Both workloads share one namespace
 
@@ -72,18 +75,6 @@ flips both service principals to requiring an app role assignment, with the
 deploying user assigned automatically so a locked-down deployment still admits
 its owner. A group object id needs Entra ID P1; user object ids work on any
 tier.
-
-## Rate limiting is a coarse ingress floor
-
-20 requests per second with a large burst, keyed on the address nginx sees --
-which is often the node rather than the browser.
-
-## Public demo DNS
-
-Through the public IP's `cloudapp.azure.com` label. That domain is not on the
-Public Suffix List, so a sibling label in the same region can set a cookie on
-this host; the session cookie is `__Host-` prefixed and the session id is
-renewed at sign-in for that reason.
 
 ## Data that resets
 

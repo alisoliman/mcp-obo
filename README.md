@@ -50,10 +50,12 @@ commented with that review in mind: where something is a deliberate trade-off,
 it says so and says why, so you can decide whether the same trade-off is right
 for you.
 
+If you would rather start by running it, [Deploy](#deploy) is six commands.
+
 ## Contents
 
+- [How it works](#how-it-works)
 - [Pick a mode](#pick-a-mode)
-- [The one idea](#the-one-idea)
 - [What runs where](#what-runs-where)
 - [Getting started](#getting-started)
   - [Prerequisites](#prerequisites)
@@ -65,9 +67,25 @@ for you.
 - [Clean up](#clean-up)
 - [Guidance](#guidance)
 
+## How it works
+
+The chat app authenticates the user and holds their delegated token. Every MCP
+call carries that token. The MCP server verifies it, then exchanges it, along
+with its own pod identity, for a token to a downstream resource that still
+carries the user.
+
+Neither workload can reach user data on its own. The MCP server holds only
+delegated permissions, and a delegated permission is inert without a caller.
+
+[How the authorization actually works](docs/authorization.md) covers this in
+detail: the three identities, the three gates, and why Microsoft Graph is not
+the authorization system.
+
 ## Pick a mode
 
-The two are alternatives, not layers. Each is a complete example; you deploy one.
+That identity path is the same in both modes. What differs is which resource it
+reaches, and therefore who decides what the caller may see. The two are
+alternatives, not layers. Each is a complete example; you deploy one.
 
 | | **graph** | **databricks** |
 |---|---|---|
@@ -77,31 +95,13 @@ The two are alternatives, not layers. Each is a complete example; you deploy one
 | Extra infrastructure | None | A premium Databricks workspace |
 | Read next | [graph mode](docs/graph-mode.md) | [databricks mode](docs/databricks-mode.md) |
 
-The identity path is **identical** in both. The only difference is which scope
-the on-behalf-of exchange asks Entra for:
+In code the difference is one argument, the scope the exchange asks Entra for,
+in `src/mcp_server/obo.py`:
 
 ```
 graph       scope = https://graph.microsoft.com/.default
 databricks  scope = 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default
 ```
-
-That is `src/mcp_server/obo.py`, shared by both. The request itself is a handful
-of arguments; the rest of the file is the credential cache and the typed Entra
-error a middle tier cannot ship without.
-
-## The one idea
-
-The chat app authenticates the user and holds their delegated token. Every MCP
-call carries that token. The MCP server verifies it, then exchanges it — along
-with its own pod identity — for a token to a downstream resource that **still
-carries the user**.
-
-Neither workload can reach user data on its own. The MCP server holds only
-delegated permissions, and a delegated permission is inert without a caller.
-
-**[How the authorization actually works](docs/authorization.md)** explains this
-properly: the three identities, the three gates, and why Microsoft Graph is not
-the authorization system. Read it once and the rest of the repo follows.
 
 ## What runs where
 
@@ -194,15 +194,11 @@ azd provision --preview --no-prompt
 uv run pytest tests/e2e_databricks.py   # databricks mode only
 ```
 
-The Python tests cover the order rules, per-user isolation, the mode switch, the
-MCP token, scope and origin requirements, the tool annotations, the Databricks
-host and identifier checks, the browser session and CSRF behaviour, that the
-tool names the chat app allows are the ones the server registers, and that the
-compiled template requests no application permission. They do not touch Azure,
-so nothing here proves a deployment works — only that the parts that can be
-decided locally are decided correctly. Everything else is checked by the tool
-that owns it: Bicep for the template, `azd provision --preview` for the plan,
-and the two image builds for the Dockerfiles.
+The Python tests do not touch Azure, so nothing there proves a deployment works,
+only that the parts that can be decided locally are decided correctly.
+Everything else is checked by the tool that owns it: Bicep for the template,
+`azd provision --preview` for the plan, and the two image builds for the
+Dockerfiles.
 
 ## Source layout
 

@@ -43,13 +43,9 @@ as bound parameters, so no tool argument can reshape the SQL — and if one coul
 the row filter would still apply.
 
 `databricks_list_tables` returns `{tables, more_available}` rather than a bare
-array, and follows page tokens until Databricks stops handing them back or it
-has read twenty pages. Databricks documents that a page can be empty and still
-carry a token, so an empty list here means Unity Catalog showed this caller
-nothing — not that the listing stopped early. Telling those two apart is the
-entire subject of the demo, which is also why `more_available` is returned
-rather than dropped: a listing cut short by the page cap says so instead of
-passing for the whole schema.
+array. An empty list means Unity Catalog showed this caller nothing, not that
+the listing stopped early, and `more_available` says when the page cap cut a
+listing short.
 
 ## What Unity Catalog enforces
 
@@ -64,13 +60,9 @@ ALTER TABLE orders SET ROW FILTER orders_row_filter ON (owner_email);
 ALTER TABLE orders ALTER COLUMN customer_email SET MASK mask_email;
 ```
 
-Both sides are lowercased because an owner typed as `Colleague@Contoso.com`
-matched nothing against the `current_user()` Databricks returns, and a result of
-zero rows is indistinguishable from correct filtering — the demo would look
-right and prove nothing. The ordering matters for the same reason in reverse: if
-the rows went in first, a transient failure between the insert and the `ALTER`
-would leave a populated table with no filter and no mask, and every caller would
-read every owner's rows.
+Both sides are lowercased, so case in an owner address does not matter. The
+filter and mask go on before any rows do, so a failure part-way through the
+bootstrap cannot leave a populated table unprotected.
 
 Owners are you, plus anyone in `DATABRICKS_DEMO_OWNERS`, plus one synthetic
 address nobody signs in as — so a default deployment holds six rows across two
@@ -137,10 +129,10 @@ uv run python -m scripts.bootstrap_databricks --no-seed  # platform only
 `--no-seed` provisions the catalog, schema and warehouse without the sample
 orders, filters and table grants. It still resolves `DATABRICKS_DEMO_OWNERS` and
 grants them CAN USE on the warehouse, because that is compute rather than data
-and someone pointed at real data needs it just as much. That is the starting
-point for pointing the server at real data: change `orders_statement` in
-`src/mcp_server/databricks.py`, set `DATABRICKS_CATALOG` and `DATABRICKS_SCHEMA`, and keep
-the statement a fixed literal with bound parameters.
+and someone pointed at real data needs it just as much. To point the server at
+real data, change `orders_statement` in `src/mcp_server/databricks.py`, set
+`DATABRICKS_CATALOG` and `DATABRICKS_SCHEMA`, and keep the statement a fixed
+literal with bound parameters.
 
 It also creates a 2X-Small serverless SQL warehouse with a ten-minute auto-stop,
 falling back to a classic PRO warehouse where serverless is unavailable.
@@ -165,15 +157,12 @@ azd env set DATABRICKS_DEMO_OWNERS "someone@contoso.com,someone-else@contoso.com
 
 Each person then asks the same question and sees only their own rows, and
 `databricks_whoami` names them individually. The server ran identical SQL every
-time. That is the demonstration worth showing a customer, because the isolation
-is visibly not the application's doing.
+time, so the isolation is visibly not the application's doing.
 
 Every address is resolved through SCIM first, and one the workspace has never
-heard of now fails the bootstrap by name. Seeding rows for an address nobody
-signs in as used to succeed quietly and prove nothing, because those rows are
-invisible to everyone and invisible is what correct filtering looks like. Have
-that person open the workspace once, or take them off the list. Case does not
-matter either way.
+heard of fails the bootstrap by name rather than seeding rows nobody can see.
+Have that person open the workspace once, or take them off the list. Case does
+not matter either way.
 
 Each named owner is also granted CAN USE on the demo SQL warehouse. Unity
 Catalog's `SELECT` is only half of what a second person needs — the warehouse
@@ -188,14 +177,10 @@ that grant by hand.
 uv run pytest tests/e2e_databricks.py
 ```
 
-Runs against the real deployment and asserts that SCIM and SQL `current_user()`
-both name the signed-in human; that a query with no owner predicate returns
-strictly fewer rows than were seeded; that `customer_email` is masked; that a
-bound parameter narrows without touching the SQL; that Databricks' own query
-history credits the statement to that human rather than to the server; that
-every seeded owner carries CAN USE on the warehouse; that the server
-application holds no `Role` permission; and that an unauthenticated `/mcp` call
-is challenged with the metadata document RFC 9728 asks for.
+Runs against the real deployment. It asserts that Databricks resolves and
+credits the signed-in human rather than the server, that a query with no owner
+predicate still comes back filtered and masked, and that the server application
+holds no application permission.
 
 It needs a delegated token, which it gets from `az account get-access-token`.
 That works only when `harnessClientAppId` pre-authorizes the Azure CLI on the
@@ -219,60 +204,19 @@ Nothing in the running system depends on it. Unset it and the harness skips.
 
 ## Things that will bite you
 
-**The first query after a quiet period is slow, and may come back asking for a
-retry** — the warehouse stops after ten minutes idle and takes minutes to come
-back, longer for the classic PRO fallback, which provisions a real VM. The tool
-waits and polls for 90 seconds; past that it returns a message saying the
-warehouse is starting and to retry shortly, worded so it cannot be mistaken for
-an authorization decision. The request that ran out of budget is the one that
-started the warehouse, so the next attempt usually lands.
-
-**`Unauthorized access to Org`** — a valid Entra token is not enough on its own;
-the identity must also exist inside the workspace, and a new workspace only
-knows whoever created it. The bootstrap works around this by sending an ARM
-management token alongside the Databricks token:
-
-```
-X-Databricks-Azure-SP-Management-Token: <token for management.core.windows.net>
-X-Databricks-Azure-Workspace-Resource-Id: <the workspace ARM resource id>
-```
-
-Anyone holding Owner or Contributor on the workspace resource is then treated as
-a workspace admin and provisioned on first call. The same requirement applies to
-**end users**: someone who has never signed in to Databricks cannot be resolved
-by the MCP tools either. Provision them through SCIM from Entra, or have them
-open the workspace once.
-
-**`PERMISSION_DENIED … CREATE FUNCTION` on a second run** — Unity Catalog
-privileges are independent of workspace admin. A schema created by one operator
-cannot be rebuilt by another until ownership moves, so the bootstrap issues
-`ALTER SCHEMA … OWNER TO` before touching anything inside it.
-
-**`INVALID_STATE: Metastore storage root URL does not exist`** — expected on a
-workspace whose metastore was auto-provisioned. It has no storage root, so
-`CREATE CATALOG` needs an explicit location. The bootstrap falls back to the
-managed catalog Azure created with the workspace and reports the name it used.
-Nothing to fix.
-
-**The OBO exchange is rejected** — the server application is missing the
-delegated `user_impersonation` permission or its consent. Activate an Entra
-application-management role, then `az login` again before re-running
-`azd provision`. Directory roles travel inside the access token, so a login
-issued before the role was activated will not carry it no matter how long you
-wait.
-
-**`azd provision --preview` shows no Databricks workspace** — ARM what-if has no
-coverage for the `Microsoft.Databricks` provider, so it silently omits those
-resources rather than reporting them as unchanged. Confirm with
-`az bicep build` instead.
+The failures specific to this mode, and what each one means, are in
+[troubleshooting](troubleshooting.md#databricks-mode). The most common by far is
+the first query after a quiet period: the warehouse stops after ten minutes idle
+and takes minutes to come back, so the tool returns a message saying so and
+asking for a retry.
 
 ## Customer-managed catalog storage
 
 The template uses Databricks Default Storage, which needs no storage account, no
 Access Connector and no Unity Catalog storage credential. If governance requires
 the catalog to sit in storage you own, add an ADLS Gen2 account with
-hierarchical namespace, a `Microsoft.Databricks/accessConnectors` resource, and a
-storage credential plus external location, then create the catalog with
+hierarchical namespace, a `Microsoft.Databricks/accessConnectors` resource, and
+a storage credential plus external location, then create the catalog with
 `MANAGED LOCATION`.
 
 Two role assignments are easy to miss and both produce unhelpful errors:

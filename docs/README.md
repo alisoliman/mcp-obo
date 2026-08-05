@@ -7,7 +7,7 @@ that would have made it too long to read.
 
 - [How the authorization actually works](authorization.md) — the three
   identities, the three gates, and why Microsoft Graph is not the authorization
-  system. Read it once and the rest of the repo follows.
+  system
 
 **The two modes**
 
