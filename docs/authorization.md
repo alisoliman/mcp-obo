@@ -1,11 +1,10 @@
 # How the authorization actually works
 
-Read this once and the rest of the repo follows. It is the same in both
-deployment modes.
+The authorization path is the same in both deployment modes.
 
-## The thing that trips everyone up
+## Entra ID authorizes, Microsoft Graph does not
 
-**Microsoft Entra ID is the authorization system. Microsoft Graph is not.**
+Entra ID is the authorization system. Microsoft Graph is a downstream API.
 
 | | What it is | Where it lives |
 |---|---|---|
@@ -13,17 +12,17 @@ deployment modes.
 | **Microsoft Graph** | An API. One downstream resource among many. | `graph.microsoft.com` |
 | **Azure Databricks** | Another API. Another downstream resource. | `adb-*.azuredatabricks.net` |
 
-Graph gets mistaken for the identity system because it is the API that exposes
-directory data — `/me`, users, groups. But as far as tokens are concerned,
-**Graph and Databricks are peers**. Neither of them authorizes anything about
-the exchange. Entra does.
+Graph exposes directory data such as `/me`, users and groups. As far as tokens
+are concerned, Graph and Databricks are peers. Neither authorizes the exchange;
+Entra issues every token.
 
 So when this repo says "OBO to Graph" and "OBO to Databricks", both exchanges
 happen at Entra. Only the destination differs.
 
 ## Three identities, kept apart
 
-This is the whole security design.
+Three identities take part in every request, and none of them can reach user
+data alone.
 
 | Identity | Where it lives | What it may do |
 |---|---|---|
@@ -44,7 +43,7 @@ The session holding the user's MSAL cache is renewed at sign-in, expires after
 30 minutes idle or 8 hours from sign-in, and exists only in that one chat pod's
 memory.
 
-## What is actually on the wire
+## The on-behalf-of request
 
 Both modes make the identical request to Entra. One parameter differs:
 
@@ -75,22 +74,19 @@ Two assertions, two different jobs:
   credential pointing at the AKS OIDC issuer and this pod's service account.
 - `assertion` answers **"on whose behalf?"** It is the caller's own token.
 
-That second one is what makes the exchange *delegated* rather than
+The `assertion` parameter is what makes the exchange delegated rather than
 application-only. Without a caller there is nothing to put there.
 
 `/.default` means "every delegated permission this client has been consented
 for that resource", rather than naming scopes one at a time.
 
 In code this is `OboExchange.token(user_assertion, scope)` in
-[`src/mcp_server/obo.py`](../src/mcp_server/obo.py). The request above is a handful of arguments; the
-rest of that file is a per-caller credential cache and a typed Entra error. No
-credential is stored anywhere: the cache holds live credential objects in this
-process's memory, keyed by a hash of the caller's own token, dropped a minute
-before that token expires and evicted the moment Entra refuses it. So one tool
-call is not one round trip to Entra, and a downstream token cannot outlive the
-assertion it was minted for. It can outlive a revocation, though: nothing tells
-this process that Entra withdrew the caller's token early, so a cached entry
-serves until the next refusal evicts it.
+[`src/mcp_server/obo.py`](../src/mcp_server/obo.py). The rest of that file is a
+per-caller credential cache held in this process's memory and a typed Entra
+error. No credential is written anywhere, and a cached credential cannot outlive
+the assertion it was minted for. It can outlive a revocation, though: nothing
+tells this process that Entra withdrew the caller's token early, so a cached
+entry serves until the next refusal evicts it.
 
 ## Three gates, three different deciders
 
@@ -125,35 +121,31 @@ That bolded line is the one that matters most here. `infra/main.bicep` requests
 never as `type: 'Role'`, which would be an application permission usable with no
 user present. A test compiles the template and asserts every entry is a `Scope`.
 
-Entra evaluates Conditional Access here; this application cannot act on the
-answer. A policy demanding a step-up comes back as a claims challenge, and
-satisfying one means relaying it: the server would have to answer `401` with a
-`WWW-Authenticate` carrying the claims, and the chat client would have to
-declare the `cp1` capability so Entra knows it can handle one. Neither is built,
-so a step-up is not recoverable inside this app. What is built is the diagnosis.
-`OboError` in `src/mcp_server/obo.py` keeps Entra's error code, the AADSTS numbers and the
-claims challenge, and reaches the user as a `ToolError` rather than being
-flattened by `mask_error_details` into an indistinguishable failure — so
-AADSTS50076 reads as the policy it is, and the user satisfies it out of band and
-signs in again.
+Entra evaluates Conditional Access here, and this application cannot act on the
+answer. A policy demanding a step-up is not recoverable inside the app, so the
+user has to satisfy it out of band and sign in again. What is built is the
+diagnosis: `OboError` in `src/mcp_server/obo.py` keeps Entra's error code and
+the claims challenge, and reaches the user as a `ToolError` rather than being
+flattened by `mask_error_details` into an indistinguishable failure, so
+AADSTS50076 reads as the policy it is.
 
 ### Gate 3 — the downstream resource decides what the token can do
 
-And this is where the two modes genuinely diverge:
+This is where the two modes differ:
 
 | | graph mode — Microsoft Graph | databricks mode — Azure Databricks |
 |---|---|---|
 | Checks | Graph's own permission model: `User.Read` lets you read your own profile | Workspace membership, then Unity Catalog grants, row filters and column masks |
 | Then what | `src/mcp_server/orders.py` partitions an in-memory dict by the object id Graph returned | Nothing. The rows arrive already filtered |
 
-Gate 3 is the argument for the whole accelerator. In graph mode the
-application is the last line of defence, and it is correct only for as long as
-every tool remembers to filter. In databricks mode the server could not return
-another user's rows if it tried, because it never received them.
+The difference matters. In graph mode the application is the last line of
+defence, and it is correct only for as long as every tool remembers to filter.
+In databricks mode the server could not return another user's rows if it tried,
+because it never received them.
 
 ## What the token carries
 
-Whichever resource you target, the returned token still identifies **the human**:
+Whichever resource you target, the returned token still identifies the human:
 
 | Claim | Value |
 |---|---|
@@ -166,27 +158,6 @@ Whichever resource you target, the returned token still identifies **the human**
 The downstream service sees *"this is Ali, relayed by the MCP server"* — not
 *"this is the MCP server"*. That is why `current_user()` in a Databricks SQL
 warehouse returns a person's UPN, and why the audit log names a human.
-
-## Why a generic MCP client cannot sign in here
-
-The server half of the MCP authorization spec is implemented: `/mcp` serves RFC
-9728 protected resource metadata and answers an unauthenticated call with a
-`WWW-Authenticate` challenge carrying `resource_metadata`, so a client can
-discover which authorization server to go to. It still cannot finish, for two
-reasons that belong to Entra rather than to this repo:
-
-- The spec says a client MUST send the RFC 8707 `resource` parameter naming the
-  canonical MCP server URI. Entra does not implement resource indicators — the
-  audience comes from the scope, which here is
-  `api://<server-app-id>/Mcp.Tools.ReadWrite` and can never equal the server's
-  URL.
-- Entra's OIDC metadata omits `code_challenge_methods_supported`, and the spec
-  tells a client that finds it missing to refuse to proceed.
-
-So authorization here works only for clients registered against the server
-application in advance: the chat app, and the Azure CLI when
-`HARNESS_CLIENT_APP_ID` pre-authorizes it. Point a generic MCP client at `/mcp`
-and it fails during discovery, not at the token endpoint.
 
 ## Where Graph does legitimately appear
 

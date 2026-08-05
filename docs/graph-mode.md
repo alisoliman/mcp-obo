@@ -9,14 +9,14 @@ on-behalf-of exchange behind every call.
 
 ## What it deploys
 
-Only the base stack — no Databricks resources, and no Databricks permission on
-the server application:
-
 - One-node Free-tier AKS with Entra integration, Azure RBAC, OIDC and Workload
   Identity, plus Basic ACR, a static public IP, ingress-nginx and cert-manager.
 - A Microsoft Foundry resource, project, and a `gpt-5.6-terra` deployment.
 - Two Entra app registrations, two federated credentials, and tenant-wide
   consent for delegated `Mcp.Tools.ReadWrite` and Graph `User.Read`.
+
+Nothing else. The orders live in the MCP server's own memory, so there is no
+data platform to provision alongside it.
 
 ## The tools
 
@@ -40,9 +40,8 @@ call, because the one-way SSE stream has nowhere to ask. So `create_order` and
 application does not control. Build an approval channel before exposing a
 mutating tool that way.
 
-The identity proof returns the Graph display name, an eight-character hash of
-the object id, and the evidence label `Microsoft Graph /me via OBO`. It never
-returns the raw object id, the token, or any claim.
+The identity proof returns a display name and a fingerprint derived from the
+object id. It never returns the raw object id, the token, or any claim.
 
 ## Demonstrating isolation
 
@@ -68,11 +67,11 @@ return list_orders_for(user.id)  # <-- the authorization decision
 
 That second line is the entire access control. It is correct only for as long
 as every tool remembers to pass the caller's id and nothing else. For a service
-that owns its data, that is a perfectly good trade — it is the model most MCP
+that owns its data, that is a perfectly good trade, and it is the model most MCP
 servers need.
 
-[Databricks mode](databricks-mode.md) is the same identity path with that
-decision moved out of the process, so the server cannot get it wrong.
+If your data already lives in a platform that can make that decision for you,
+[databricks mode](databricks-mode.md) reaches one over the same identity path.
 
 ## Adapting it to your own tools
 

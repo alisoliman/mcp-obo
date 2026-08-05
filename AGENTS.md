@@ -1,8 +1,8 @@
 # Instructions for coding agents
 
 Keep this file current. If a change moves a file or alters one of the
-procedures below, update this file in the same commit — it is the map both
-people and agents navigate by, and a stale map is worse than none.
+procedures below, update this file in the same commit. Both people and agents
+navigate by it, so an out-of-date entry is worse than a missing one.
 
 - [Code layout](#code-layout)
 - [Running the checks](#running-the-checks)
@@ -18,7 +18,7 @@ people and agents navigate by, and a stale map is worse than none.
 ## Code layout
 
 Two workloads, deployed as two pods with two Entra app registrations and two
-service accounts. The directory split is the trust boundary, not tidiness.
+service accounts. The directory split marks the trust boundary between them.
 
 ```
 src/
@@ -127,8 +127,8 @@ through `uv run python -m`, which works identically on both.
 1. Write it in `src/mcp_server/orders.py` or `src/mcp_server/databricks.py`,
    inside that module's `register()`.
 2. Take the caller's token through the `AccessToken` dependency and resolve the
-   user from it. Every tool does; that is what makes per-user isolation
-   structural rather than remembered.
+   user from it. Every tool does this, so no tool can skip the check by
+   accident.
 3. **Annotate it.** An unannotated tool reads as writing, and writing reads as
    destructive, to anything applying a policy of its own. `_READ_ONLY`,
    `_ADDITIVE` and `_ONE_WAY` in `orders.py` are the three shapes in use.
@@ -172,7 +172,8 @@ that mode alone — so `tests/test_infrastructure.py` and
 7. `frontend/src/App.tsx` — add the key to `modes`, with the sample prompts and
    copy the browser shows when that mode is deployed.
 8. `tests/test_contracts.py` — add the mode.
-9. `README.md` and `docs/README.md` — the mode table, and a `docs/<mode>-mode.md`.
+9. `README.md` and `docs/README.md` — the mode table, and a
+   `docs/<mode>-mode.md`.
 10. `.github/ISSUE_TEMPLATE/deployment-problem.yml` — add the name to the
     `Which mode` dropdown. Nothing asserts this one; it stays wrong until
     someone reporting a failure in the new mode has to pick another mode's
