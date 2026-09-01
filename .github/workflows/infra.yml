@@ -23,7 +23,7 @@ jobs:
   bicep:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Bicep
         run: az bicep install
@@ -48,7 +48,7 @@ jobs:
   kustomize:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Render both overlays
         # `azd deploy` writes an `images:` block into each kustomization before
